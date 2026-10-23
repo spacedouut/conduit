@@ -10,7 +10,7 @@
    id="svg11300"
    sodipodi:version="0.32"
    inkscape:version="1.1.1 (3bf5ae0d25, 2021-09-20)"
-   sodipodi:docname="org.pipewire.Helvum.Source.svg"
+   sodipodi:docname="io.github.spacedouut.Conduit.Source.svg"
    inkscape:output_extension="org.inkscape.output.svg.inkscape"
    version="1.0"
    style="display:inline;enable-background:new"
@@ -3143,7 +3143,7 @@
   <g
      inkscape:groupmode="layer"
      id="layer5"
-     inkscape:label="Helvum"
+     inkscape:label="Conduit"
      transform="translate(8,-156)">
     <rect
        style="display:inline;fill:#241f31;fill-opacity:1;fill-rule:nonzero;stroke:none;stroke-width:1.20761;stroke-linecap:round;stroke-linejoin:bevel;stroke-opacity:1;paint-order:normal;enable-background:new"

@@ -2,7 +2,7 @@
 
 The following describes the process of making a new release:
 
-1. In `data/org.pipewire.Helvum.metainfo.xml.in`,
+1. In `data/io.github.spacedouut.Conduit.metainfo.xml.in`,
    add a new `<release>` tag to the releases section with the appropriate version and date.
 
 2. In `meson.build` and `Cargo.toml`, bumb the projects version to the new version.
@@ -16,7 +16,9 @@ The following describes the process of making a new release:
 6. Make a **new** meson build directory and run `meson dist`.
    Two files should be created in a `meson-dist` subdirectory:
 
-   `helvum-x.y.z.tar.xz` and 
-   `helvum-x.y.z.tar.xz.sha256sum`
+   `conduit-x.y.z.tar.xz` and
+   `conduit-x.y.z.tar.xz.sha256sum`
 
-7. Push the new commit and tag to upstream, then create a new release on gitlab from the new tag, the description from the tags message formatted as markdown, and also add the two files from step 6 to the description.
+7. Push the new commit and tag to GitHub. The CI workflow builds the Flatpak and,
+   for every push to `main`, publishes the signed repository to GitHub Pages. A tag
+   build can be attached to a GitHub release together with the files from step 6.

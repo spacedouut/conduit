@@ -5,24 +5,41 @@
   <menu id="primary_menu">
     <section>
       <item>
-        <attribute name="label">_About Helvum</attribute>
+        <attribute name="label">_About Conduit</attribute>
         <attribute name="action">app.about</attribute>
       </item>
     </section>
   </menu>
-  <template class="HelvumWindow" parent="AdwApplicationWindow">
+  <template class="ConduitWindow" parent="AdwApplicationWindow">
     <property name="default-width">1280</property>
     <property name="default-height">720</property>
     <child>
       <object class="AdwToolbarView">
         <child type="top">
           <object class="AdwHeaderBar" id="header_bar">
+            <child type="start">
+              <object class="GtkButton" id="create_virtual_device_button">
+                <property name="label" translatable="yes">Add virtual device</property>
+                <property name="tooltip-text" translatable="yes">Create a session-scoped audio input or output</property>
+                <style>
+                  <class name="suggested-action"/>
+                  <class name="virtual-device-action"/>
+                </style>
+              </object>
+            </child>
+            <child type="start">
+              <object class="GtkButton" id="manage_virtual_devices_button">
+                <property name="label" translatable="yes">Manage</property>
+                <property name="sensitive">false</property>
+                <property name="tooltip-text" translatable="yes">Remove virtual devices created in this session</property>
+              </object>
+            </child>
             <property name="title-widget">
               <object class="GtkBox">
                 <property name="orientation">vertical</property>
                 <child>
                   <object class="GtkLabel">
-                    <property name="label">Helvum - Pipewire Patchbay</property>
+                    <property name="label">Conduit — PipeWire Patchbay</property>
                     <property name="single-line-mode">True</property>
                     <property name="ellipsize">end</property>
                     <property name="width-chars">5</property>
@@ -49,6 +66,41 @@
             </property>
             <child type="end">
               <object class="GtkMenuButton">
+                <property name="tooltip-text" translatable="yes">Graph visibility</property>
+                <property name="child">
+                  <object class="GtkImage">
+                    <property name="icon-name">view-more-symbolic</property>
+                  </object>
+                </property>
+                <property name="popover">
+                  <object class="GtkPopover">
+                    <child>
+                      <object class="GtkBox">
+                        <property name="orientation">vertical</property>
+                        <property name="spacing">6</property>
+                        <property name="margin-top">8</property>
+                        <property name="margin-bottom">8</property>
+                        <property name="margin-start">8</property>
+                        <property name="margin-end">8</property>
+                        <child>
+                          <object class="GtkCheckButton" id="show_monitor_ports_button">
+                            <property name="label" translatable="yes">Show monitor ports</property>
+                            <property name="active">true</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkButton" id="edit_node_filters_button">
+                            <property name="label" translatable="yes">Hidden node patterns…</property>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                  </object>
+                </property>
+              </object>
+            </child>
+            <child type="end">
+              <object class="GtkMenuButton">
                 <property name="icon-name">open-menu-symbolic</property>
                 <property name="menu-model">primary_menu</property>
               </object>
@@ -69,7 +121,7 @@
                 <child>
                   <object class="GtkScrolledWindow">
                     <child>
-                      <object class="HelvumGraphView" id="graph">
+                      <object class="ConduitGraphView" id="graph">
                         <property name="hexpand">true</property>
                         <property name="vexpand">true</property>
                       </object>
@@ -77,7 +129,7 @@
                   </object>
                 </child>
                 <child type="overlay">
-                  <object class="HelvumZoomEntry">
+                  <object class="ConduitZoomEntry">
                     <property name="zoomed-widget">graph</property>
                     <property name="halign">end</property>
                     <property name="valign">end</property>

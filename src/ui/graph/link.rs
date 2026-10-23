@@ -30,6 +30,7 @@ mod imp {
         pub output_port: glib::WeakRef<Port>,
         pub input_port: glib::WeakRef<Port>,
         pub active: Cell<bool>,
+        pub visible: Cell<bool>,
         pub media_type: Cell<MediaType>,
     }
 
@@ -39,6 +40,7 @@ mod imp {
                 output_port: glib::WeakRef::default(),
                 input_port: glib::WeakRef::default(),
                 active: Cell::default(),
+                visible: Cell::new(true),
                 media_type: Cell::new(MediaType::Unknown),
             }
         }
@@ -46,7 +48,7 @@ mod imp {
 
     #[glib::object_subclass]
     impl ObjectSubclass for Link {
-        const NAME: &'static str = "HelvumLink";
+        const NAME: &'static str = "ConduitLink";
         type Type = super::Link;
         type ParentType = glib::Object;
     }
@@ -65,6 +67,10 @@ mod imp {
                         .default_value(false)
                         .flags(glib::ParamFlags::READWRITE)
                         .build(),
+                    glib::ParamSpecBoolean::builder("visible")
+                        .default_value(true)
+                        .flags(glib::ParamFlags::READWRITE)
+                        .build(),
                     glib::ParamSpecUInt::builder("media-type")
                         .default_value(MediaType::Unknown.as_raw())
                         .flags(glib::ParamFlags::READWRITE)
@@ -80,6 +86,7 @@ mod imp {
                 "output-port" => self.output_port.upgrade().to_value(),
                 "input-port" => self.input_port.upgrade().to_value(),
                 "active" => self.active.get().to_value(),
+                "visible" => self.visible.get().to_value(),
                 "media-type" => self.media_type.get().as_raw().to_value(),
                 _ => unimplemented!(),
             }
@@ -90,6 +97,7 @@ mod imp {
                 "output-port" => self.output_port.set(value.get().unwrap()),
                 "input-port" => self.input_port.set(value.get().unwrap()),
                 "active" => self.active.set(value.get().unwrap()),
+                "visible" => self.visible.set(value.get().unwrap()),
                 "media-type" => self
                     .media_type
                     .set(MediaType::from_raw(value.get().unwrap())),
@@ -130,6 +138,14 @@ impl Link {
 
     pub fn set_active(&self, active: bool) {
         self.set_property("active", active);
+    }
+
+    pub fn visible(&self) -> bool {
+        self.property("visible")
+    }
+
+    pub fn set_visible(&self, visible: bool) {
+        self.set_property("visible", visible);
     }
 
     pub fn media_type(&self) -> MediaType {

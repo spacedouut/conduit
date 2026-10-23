@@ -15,6 +15,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use adw::{glib, gtk, prelude::*, subclass::prelude::*};
+use glib::subclass::Signal;
+use once_cell::sync::Lazy;
 use pipewire::spa::utils::Direction;
 
 use super::Port;
@@ -58,12 +60,15 @@ mod imp {
         pub(super) separator: TemplateChild<gtk::Separator>,
         #[template_child]
         pub(super) port_grid: TemplateChild<gtk::Grid>,
+        #[template_child]
+        pub(super) volume_scale: TemplateChild<gtk::Scale>,
+        pub(super) show_volume_sliders: Cell<bool>,
         pub(super) ports: RefCell<HashSet<Port>>,
     }
 
     #[glib::object_subclass]
     impl ObjectSubclass for Node {
-        const NAME: &'static str = "HelvumNode";
+        const NAME: &'static str = "ConduitNode";
         type Type = super::Node;
         type ParentType = gtk::Widget;
 
@@ -91,6 +96,46 @@ mod imp {
             // Display a grab cursor when the mouse is over the label so the user knows the node can be dragged.
             self.node_name
                 .set_cursor(gtk::gdk::Cursor::from_name("grab", None).as_ref());
+
+            self.volume_scale
+                .add_mark(1.0, gtk::PositionType::Bottom, None);
+
+            let click = gtk::GestureClick::new();
+            click.set_button(gtk::gdk::BUTTON_SECONDARY);
+            click.connect_pressed(|click, _, x, y| {
+                let node = click.widget().downcast::<super::Node>().unwrap();
+                let popover = gtk::Popover::new();
+                let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                let show_sliders = gtk::CheckButton::with_label("Show volume sliders");
+                show_sliders.set_active(node.imp().show_volume_sliders.get());
+                show_sliders.connect_toggled(glib::clone!(@weak node => move |button| {
+                    node.emit_by_name::<()>("show-volume-sliders-changed", &[&button.is_active()]);
+                }));
+                content.append(&show_sliders);
+                let button = gtk::Button::with_label("Disconnect all");
+                button.connect_clicked(glib::clone!(@weak node, @weak popover => move |_| {
+                    node.emit_by_name::<()>("disconnect-all", &[]);
+                    popover.popdown();
+                }));
+                content.append(&button);
+                popover.set_child(Some(&content));
+                popover.set_parent(&node);
+                popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+                popover.popup();
+            });
+            self.obj().add_controller(click);
+        }
+
+        fn signals() -> &'static [Signal] {
+            static SIGNALS: Lazy<Vec<Signal>> = Lazy::new(|| {
+                vec![
+                    Signal::builder("disconnect-all").build(),
+                    Signal::builder("show-volume-sliders-changed")
+                        .param_types([bool::static_type()])
+                        .build(),
+                ]
+            });
+            SIGNALS.as_ref()
         }
 
         fn dispose(&self) {
@@ -153,6 +198,13 @@ glib::wrapper! {
 }
 
 impl Node {
+    pub fn volume_scale(&self) -> gtk::Scale {
+        self.imp().volume_scale.clone()
+    }
+    pub fn set_show_volume_sliders(&self, show: bool) {
+        self.imp().show_volume_sliders.set(show);
+        self.volume_scale().set_visible(show);
+    }
     pub fn new(name: &str, pipewire_id: u32) -> Self {
         glib::Object::builder()
             .property("node-name", name)

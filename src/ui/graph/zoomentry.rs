@@ -48,7 +48,7 @@ mod imp {
 
     #[glib::object_subclass]
     impl ObjectSubclass for ZoomEntry {
-        const NAME: &'static str = "HelvumZoomEntry";
+        const NAME: &'static str = "ConduitZoomEntry";
         type Type = super::ZoomEntry;
         type ParentType = gtk::Box;
 

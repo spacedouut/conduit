@@ -96,6 +96,8 @@ mod imp {
 
         // This keeps track of an ongoing move view gesture.
         pub move_view_state: Cell<(f64, f64)>,
+
+        pub node_position_changed: RefCell<Option<Box<dyn Fn(&Node, Point)>>>,
     }
 
     impl Default for GraphView {
@@ -112,13 +114,14 @@ mod imp {
                 zoom_gesture_initial_zoom: Default::default(),
                 zoom_gesture_anchor: Default::default(),
                 move_view_state: Default::default(),
+                node_position_changed: Default::default(),
             }
         }
     }
 
     #[glib::object_subclass]
     impl ObjectSubclass for GraphView {
-        const NAME: &'static str = "HelvumGraphView";
+        const NAME: &'static str = "ConduitGraphView";
         type Type = super::GraphView;
         type ParentType = gtk::Widget;
         type Interfaces = (gtk::Scrollable,);
@@ -331,13 +334,31 @@ mod imp {
                 let transform = widget.imp().screen_space_to_canvas_space_transform();
                 let canvas_node_origin = transform.transform_point(&onscreen_node_origin);
 
-                widget.move_node(
+                widget.set_node_position(
                     &node,
                     &Point::new(
                         canvas_node_origin.x() - offset.x(),
                         canvas_node_origin.y() - offset.y(),
                     ),
                 );
+            });
+            drag_controller.connect_drag_end(|drag_controller, _, _| {
+                let widget = drag_controller
+                    .widget()
+                    .dynamic_cast::<super::GraphView>()
+                    .expect("drag-end event is not on the GraphView");
+                let Some(drag_state) = widget.imp().dragged_node.borrow_mut().take() else {
+                    return;
+                };
+                let Some(node) = drag_state.node.upgrade() else {
+                    return;
+                };
+                let Some(position) = widget.node_position(&node) else {
+                    return;
+                };
+                if let Some(callback) = widget.imp().node_position_changed.borrow().as_ref() {
+                    callback(&node, position);
+                };
             });
             self.obj().add_controller(drag_controller);
         }
@@ -631,7 +652,7 @@ mod imp {
                     .expect("color not found"),
             };
 
-            for link in self.links.borrow().iter() {
+            for link in self.links.borrow().iter().filter(|link| link.visible()) {
                 let color = &colors.color_for_media_type(link.media_type());
 
                 // TODO: Do not draw links when they are outside the view
@@ -809,6 +830,12 @@ impl GraphView {
         imp.nodes.borrow_mut().insert(node, Point::new(x, y));
     }
 
+    pub fn set_node_position_changed_handler(&self, callback: impl Fn(&Node, Point) + 'static) {
+        self.imp()
+            .node_position_changed
+            .replace(Some(Box::new(callback)));
+    }
+
     pub fn remove_node(&self, node: &Node) {
         let mut nodes = self.imp().nodes.borrow_mut();
 
@@ -858,7 +885,7 @@ impl GraphView {
         self.imp().nodes.borrow().get(node).copied()
     }
 
-    pub(super) fn move_node(&self, widget: &Node, point: &Point) {
+    pub fn set_node_position(&self, widget: &Node, point: &Point) {
         let mut nodes = self.imp().nodes.borrow_mut();
         let node_point = nodes.get_mut(widget).expect("Node is not on the graph");
 

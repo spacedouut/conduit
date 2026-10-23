@@ -1,12 +1,12 @@
 # Architecture
-If you want to understand the high-level architecture of helvum,
+If you want to understand the high-level architecture of conduit,
 this document is the right place.
 
 It provides a birds-eye view of the general architecture, and also goes into details on some
 components like the view.
 
 # Top Level Architecture
-Helvum uses an architecture with the components laid out like this:
+Conduit uses an architecture with the components laid out like this:
 
 ```
 ┌──────┐

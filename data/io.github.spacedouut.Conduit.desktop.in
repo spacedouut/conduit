@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Conduit
+GenericName=PipeWire Patchbay
+Comment=Route audio, video, and MIDI connections
+Type=Application
+Exec=conduit
+Terminal=false
+Categories=AudioVideo;Audio;Video;Midi;Settings;GNOME;GTK;
+Icon=@icon@
+StartupWMClass=io.github.spacedouut.Conduit

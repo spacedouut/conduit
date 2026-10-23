@@ -10,7 +10,10 @@ else
   message('Building in debug mode')
 endif
 
-cargo_env = [ 'CARGO_HOME=' + meson.project_build_root() / 'cargo-home' ]
+cargo_env = [
+  'CARGO_HOME=' + meson.project_build_root() / 'cargo-home',
+  'BINDGEN_EXTRA_CLANG_ARGS=-include ' + bindgen_compat,
+]
 
 custom_target(
   'cargo-build',

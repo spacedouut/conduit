@@ -89,4 +89,19 @@ impl State {
             None
         }
     }
+
+    pub fn link_ids_for_node(&self, node_id: u32) -> Vec<u32> {
+        self.items
+            .iter()
+            .filter_map(|(id, item)| match item {
+                Item::Link { port_from, port_to }
+                    if self.get_node_of_port(*port_from) == Some(node_id)
+                        || self.get_node_of_port(*port_to) == Some(node_id) =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .collect()
+    }
 }

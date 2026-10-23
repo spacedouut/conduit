@@ -27,7 +27,7 @@ use pipewire::channel::Sender;
 use crate::{graph_manager::GraphManager, ui, GtkMessage, PipewireMessage};
 
 static STYLE: &str = include_str!("style.css");
-static APP_ID: &str = "org.pipewire.Helvum";
+static APP_ID: &str = "io.github.spacedouut.Conduit";
 static VERSION: &str = env!("CARGO_PKG_VERSION");
 static AUTHORS: &str = env!("CARGO_PKG_AUTHORS");
 
@@ -48,7 +48,7 @@ mod imp {
 
     #[glib::object_subclass]
     impl ObjectSubclass for Application {
-        const NAME: &'static str = "HelvumApplication";
+        const NAME: &'static str = "ConduitApplication";
         type Type = super::Application;
         type ParentType = adw::Application;
     }
@@ -70,7 +70,7 @@ mod imp {
             }));
             self.window.add_action(&zoom_set_action);
 
-            self.window.show();
+            self.window.present();
         }
 
         fn startup(&self) {
@@ -123,12 +123,12 @@ mod imp {
             let about_window = adw::AboutWindow::builder()
                 .transient_for(&window)
                 .application_icon(APP_ID)
-                .application_name("Helvum")
-                .developer_name("Tom Wagner")
+                .application_name("Conduit")
+                .developer_name("spacedouut")
                 .developers(authors)
                 .version(VERSION)
-                .website("https://gitlab.freedesktop.org/pipewire/helvum")
-                .issue_url("https://gitlab.freedesktop.org/pipewire/helvum/-/issues")
+                .website("https://github.com/spacedouut/conduit")
+                .issue_url("https://github.com/spacedouut/conduit/issues")
                 .license_type(gtk::License::Gpl30Only)
                 .build();
 
@@ -185,12 +185,24 @@ impl Application {
 
         imp.graph_manager
             .set(GraphManager::new(
+                &imp.window,
                 &imp.window.graph(),
                 &imp.window.connection_banner(),
                 pw_sender,
                 gtk_receiver,
             ))
             .expect("Should be able to set graph manager");
+
+        let (tray_sender, tray_receiver) = async_channel::unbounded();
+        crate::tray::spawn(tray_sender);
+        glib::MainContext::default().spawn_local(clone!(@strong app => async move {
+            while let Ok(action) = tray_receiver.recv().await {
+                match action {
+                    crate::tray::Action::ShowWindow => app.imp().window.present(),
+                    crate::tray::Action::Quit => app.quit(),
+                }
+            }
+        }));
 
         app
     }

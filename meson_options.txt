@@ -6,6 +6,6 @@ option(
     'development'
   ],
   value: 'default',
-  description: 'The build profile for Helvum. One of "default" or "development".'
+  description: 'The build profile for Conduit. One of "default" or "development".'
 )
 

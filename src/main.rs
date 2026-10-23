@@ -16,8 +16,13 @@
 
 mod application;
 mod graph_manager;
+mod node_filter;
+mod node_layout;
 mod pipewire_connection;
+mod tray;
 mod ui;
+mod virtual_device_store;
+mod volume_slider_setting;
 
 use adw::{gtk, prelude::*};
 use pipewire::spa::{param::format::MediaType, utils::Direction};
@@ -26,7 +31,28 @@ use pipewire::spa::{param::format::MediaType, utils::Direction};
 #[derive(Debug, Clone)]
 pub enum GtkMessage {
     /// Toggle a link between the two specified ports.
-    ToggleLink { port_from: u32, port_to: u32 },
+    ToggleLink {
+        port_from: u32,
+        port_to: u32,
+    },
+    SetNodeVolume {
+        node_id: u32,
+        volume: f32,
+    },
+    DisconnectNode {
+        node_id: u32,
+    },
+    /// Create a virtual audio endpoint owned by this Conduit session.
+    CreateVirtualDevice {
+        id: u32,
+        name: String,
+        kind: VirtualDeviceKind,
+        channels: VirtualDeviceChannels,
+    },
+    /// Remove a virtual audio endpoint created by this Conduit session.
+    RemoveVirtualDevice {
+        id: u32,
+    },
     /// Connect to PipeWire service.
     Connect(Option<String>),
     /// Quit the event loop and let the thread finish.
@@ -39,18 +65,26 @@ pub enum PipewireMessage {
     NodeAdded {
         id: u32,
         name: String,
+        layout_key: String,
         node_type: Option<NodeType>,
+        is_meter: bool,
     },
     NodeNameChanged {
         id: u32,
         name: String,
         media_name: String,
     },
+    NodeVolumeChanged {
+        id: u32,
+        volume: f32,
+    },
     PortAdded {
         id: u32,
         node_id: u32,
         name: String,
         direction: Direction,
+        is_monitor: bool,
+        is_meter: bool,
     },
     PortFormatChanged {
         id: u32,
@@ -81,6 +115,18 @@ pub enum PipewireMessage {
     LinkRemoved {
         id: u32,
     },
+    VirtualDeviceCreated {
+        id: u32,
+        name: String,
+        kind: VirtualDeviceKind,
+        channels: VirtualDeviceChannels,
+    },
+    VirtualDeviceRemoved {
+        id: u32,
+    },
+    VirtualDeviceError {
+        message: String,
+    },
     Connecting,
     Connected,
     Disconnected,
@@ -90,6 +136,20 @@ pub enum PipewireMessage {
 pub enum NodeType {
     Input,
     Output,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum VirtualDeviceKind {
+    /// A sink applications can play into.
+    Sink,
+    /// A source applications can record from.
+    Source,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum VirtualDeviceChannels {
+    Mono,
+    Stereo,
 }
 
 #[derive(Debug, Clone)]

@@ -4,25 +4,33 @@
     <id>@app-id@</id>
     <metadata_license>CC-BY-SA-4.0</metadata_license>
     <project_license>GPL-3.0-only</project_license>
-    <name>Helvum</name>
+    <name>Conduit</name>
     <summary>Patchbay for PipeWire</summary>
     <description>
         <p>
-            Helvum is a graphical patchbay for PipeWire.
+            Conduit is a graphical patchbay for PipeWire.
             It allows creating and removing connections between applications and/or devices to reroute
             flow of audio, video and MIDI data to where it is needed.
         </p>
     </description>
     <screenshots>
         <screenshot type="default">
-            <image>https://gitlab.freedesktop.org/pipewire/helvum/-/raw/main/docs/screenshot.png</image>
+            <image>https://raw.githubusercontent.com/spacedouut/conduit/main/docs/screenshot.png</image>
         </screenshot>
     </screenshots>
     <launchable type="desktop-id">@app-id@.desktop</launchable>
-    <url type="homepage">https://gitlab.freedesktop.org/pipewire/helvum</url>
-    <url type="bugtracker">https://gitlab.freedesktop.org/pipewire/helvum/-/issues</url>
+    <url type="homepage">https://github.com/spacedouut/conduit</url>
+    <url type="bugtracker">https://github.com/spacedouut/conduit/issues</url>
     <content_rating type="oars-1.0" />
     <releases>
+        <release version="0.6.0" date="2026-10-23">
+            <description>
+                <p>
+                    Renamed the project to Conduit, added virtual audio devices, per-node
+                    volume controls, node filtering, saved node layouts, and a tray icon.
+                </p>
+            </description>
+        </release>
         <release version="0.5.1" date="2023-09-28" />
         <release version="0.5.0" date="2023-09-28" />
         <release version="0.4.1" date="2023-08-18" />
@@ -40,6 +48,7 @@
         <kodu>HiDpiIcon</kodu>
         <kudo>ModernToolkit</kudo>
     </kudos>
-    <developer_name>Tom A. Wagner</developer_name>
-    <update_contact>tom.a.wagner@protonmail.com</update_contact>
+    <developer id="io.github.spacedouut">
+        <name>spacedouut</name>
+    </developer>
 </component>

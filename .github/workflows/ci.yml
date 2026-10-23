@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  flatpak:
+    name: Flatpak build
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-49
+      options: --privileged
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Import Flatpak repository signing key
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -n "$FLATPAK_GPG_PRIVATE_KEY" ]; then
+            mkdir -p ~/.gnupg
+            chmod 700 ~/.gnupg
+            printf '%s\n' "$FLATPAK_GPG_PRIVATE_KEY" | gpg --batch --import
+            key_id="$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ { print $5; exit }')"
+            echo "FLATPAK_GPG_KEY_ID=$key_id" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build Flatpak bundle
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: conduit.flatpak
+          manifest-path: build-aux/io.github.spacedouut.Conduit.json
+          branch: main
+          repo-dir: repo
+          build-dir: flatpak_app
+          cache-key: flatpak-builder-${{ github.ref_name }}
+          gpg-sign: ${{ env.FLATPAK_GPG_KEY_ID }}
+
+      - name: Prepare Flatpak repository for GitHub Pages
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          flatpak build-update-repo \
+            --prune \
+            --generate-static-deltas \
+            --gpg-sign="$FLATPAK_GPG_KEY_ID" \
+            repo
+
+          mkdir -p site
+          cp -a repo site/repo
+          cp build-aux/conduit.flatpakrepo site/conduit.flatpakrepo
+          cp build-aux/io.github.spacedouut.Conduit.flatpakref site/io.github.spacedouut.Conduit.flatpakref
+          touch site/.nojekyll
+
+      - name: Upload Pages artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  lint:
+    name: Rust formatting
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  deploy:
+    name: Publish Flatpak repository
+    needs: flatpak
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

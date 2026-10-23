@@ -16,19 +16,19 @@
 
 mod state;
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
+use std::{cell::RefCell, collections::HashMap, mem::MaybeUninit, rc::Rc, time::Duration};
 
-use adw::glib::{self, clone};
+use adw::glib::clone;
 use log::{debug, error, info, warn};
 use pipewire::{
-    context::Context,
+    context::ContextRc,
     core::{Core, PW_ID_CORE},
     keys,
     link::{Link, LinkChangeMask, LinkInfoRef, LinkListener, LinkState},
-    main_loop::MainLoop,
+    main_loop::MainLoopRc,
     node::{Node, NodeInfoRef, NodeListener},
     port::{Port, PortChangeMask, PortInfoRef, PortListener},
-    properties::{properties, Properties},
+    properties::{properties, PropertiesBox},
     registry::{GlobalObject, Registry},
     spa::{
         param::{ParamInfoFlags, ParamType},
@@ -38,13 +38,35 @@ use pipewire::{
     types::ObjectType,
 };
 
-use crate::{GtkMessage, MediaType, NodeType, PipewireMessage};
+use crate::{
+    GtkMessage, MediaType, NodeType, PipewireMessage, VirtualDeviceChannels, VirtualDeviceKind,
+};
 use state::{Item, State};
+
+fn property_is_true(props: &DictRef, key: &str) -> bool {
+    matches!(props.get(key), Some("1" | "true" | "yes"))
+}
+
+fn is_meter(props: &DictRef) -> bool {
+    [
+        "node.name",
+        "node.nick",
+        "node.description",
+        "media.name",
+        "application.name",
+        "media.role",
+        "port.name",
+    ]
+    .into_iter()
+    .filter_map(|key| props.get(key))
+    .any(|value| value.to_ascii_lowercase().contains("meter"))
+}
 
 enum ProxyItem {
     Node {
         _proxy: Node,
         _listener: NodeListener,
+        channels: usize,
     },
     Port {
         proxy: Port,
@@ -58,7 +80,7 @@ enum ProxyItem {
 
 struct LoopState {
     is_stopped: bool,
-    props: Properties,
+    props: PropertiesBox,
 }
 
 impl LoopState {
@@ -80,8 +102,8 @@ pub(super) fn thread_main(
     gtk_sender: async_channel::Sender<PipewireMessage>,
     mut pw_receiver: pipewire::channel::Receiver<GtkMessage>,
 ) {
-    let mainloop = MainLoop::new(None).expect("Failed to create mainloop");
-    let context = Rc::new(Context::new(&mainloop).expect("Failed to create context"));
+    let mainloop = MainLoopRc::new(None).expect("Failed to create mainloop");
+    let context = ContextRc::new(&mainloop, None).expect("Failed to create context");
     let loop_state = Rc::new(RefCell::new(LoopState {
         is_stopped: false,
         props: properties! {
@@ -104,8 +126,8 @@ pub(super) fn thread_main(
     while !loop_state.borrow().is_stopped {
         // Try to connect
         let props = loop_state.borrow().props.clone();
-        let core = match context.connect(Some(props)) {
-            Ok(core) => Rc::new(core),
+        let core = match context.connect_rc(Some(props)) {
+            Ok(core) => core,
             Err(_) => {
                 if !is_connecting {
                     is_connecting = true;
@@ -147,15 +169,35 @@ pub(super) fn thread_main(
                 .expect("Failed to send message");
         }
 
-        let registry = Rc::new(core.get_registry().expect("Failed to get registry"));
+        let registry = core.get_registry_rc().expect("Failed to get registry");
 
         // Keep proxies and their listeners alive so that we can receive info events.
         let proxies = Rc::new(RefCell::new(HashMap::new()));
         let state = Rc::new(RefCell::new(State::new()));
+        // Holding these proxies owns the endpoints. They intentionally do not
+        // linger, so disconnecting or closing Conduit removes them.
+        let virtual_devices = Rc::new(RefCell::new(HashMap::new()));
 
         let receiver = pw_receiver.attach(mainloop.loop_(), {
-            clone!(@strong mainloop, @weak core, @weak registry, @strong state, @strong loop_state => move |msg| match msg {
+            clone!(@strong mainloop, @strong core, @strong registry, @strong proxies, @strong state, @strong loop_state, @strong virtual_devices, @strong gtk_sender => move |msg| match msg {
                 GtkMessage::ToggleLink { port_from, port_to } => toggle_link(port_from, port_to, &core, &registry, &state),
+                GtkMessage::SetNodeVolume { node_id, volume } => set_node_volume(node_id, volume, &proxies),
+                GtkMessage::DisconnectNode { node_id } => disconnect_node(node_id, &registry, &state),
+                GtkMessage::CreateVirtualDevice { id, name, kind, channels } => create_virtual_device(
+                    id,
+                    name,
+                    kind,
+                    channels,
+                    &core,
+                    &virtual_devices,
+                    &gtk_sender,
+                ),
+                GtkMessage::RemoveVirtualDevice { id } => remove_virtual_device(
+                    id,
+                    &core,
+                    &virtual_devices,
+                    &gtk_sender,
+                ),
                 GtkMessage::Terminate | GtkMessage::Connect(_) => {
                     loop_state.borrow_mut().handle_message(msg);
                     mainloop.quit();
@@ -185,7 +227,7 @@ pub(super) fn thread_main(
 
         let _listener = registry
             .add_listener_local()
-            .global(clone!(@strong gtk_sender, @weak registry, @strong proxies, @strong state =>
+            .global(clone!(@strong gtk_sender, @strong registry, @strong proxies, @strong state =>
                 move |global| match global.type_ {
                     ObjectType::Node => handle_node(global, &gtk_sender, &registry, &proxies, &state),
                     ObjectType::Port => handle_port(global, &gtk_sender, &registry, &proxies, &state),
@@ -222,6 +264,183 @@ pub(super) fn thread_main(
     }
 }
 
+fn set_node_volume(id: u32, volume: f32, proxies: &Rc<RefCell<HashMap<u32, ProxyItem>>>) {
+    let proxies = proxies.borrow();
+    let Some(ProxyItem::Node {
+        _proxy: node,
+        channels,
+        ..
+    }) = proxies.get(&id)
+    else {
+        warn!("Cannot set volume for unknown node {id}");
+        return;
+    };
+
+    let volume = volume.clamp(0.0, 1.5);
+    let channel_volumes = vec![volume; *channels];
+    let mut data = Vec::new();
+    let mut builder = pipewire::spa::pod::builder::Builder::new(&mut data);
+    let mut frame = MaybeUninit::uninit();
+    let result = unsafe {
+        builder.push_object(
+            &mut frame,
+            pipewire::spa::sys::SPA_TYPE_OBJECT_Props,
+            pipewire::spa::sys::SPA_PARAM_Props,
+        )
+    }
+    .and_then(|_| builder.add_prop(pipewire::spa::sys::SPA_PROP_volume, 0))
+    .and_then(|_| builder.add_float(volume))
+    // PipeWire applies a device's effective gain through channelVolumes.  The
+    // scalar volume property alone is not enough for current WirePlumber nodes.
+    .and_then(|_| builder.add_prop(pipewire::spa::sys::SPA_PROP_channelVolumes, 0))
+    .and_then(|_| unsafe {
+        builder.add_array(
+            std::mem::size_of::<f32>() as u32,
+            pipewire::spa::sys::SPA_TYPE_Float,
+            channel_volumes.len() as u32,
+            channel_volumes.as_ptr().cast(),
+        )
+    });
+    if let Err(error) = result {
+        warn!("Could not build volume parameter for node {id}: {error}");
+        return;
+    }
+    unsafe { builder.pop(frame.assume_init_mut()) };
+    let pod = unsafe { pipewire::spa::pod::Pod::from_raw(builder.deref(0)) };
+    node.set_param(pipewire::spa::param::ParamType::Props, 0, pod);
+}
+
+fn disconnect_node(node_id: u32, registry: &Registry, state: &Rc<RefCell<State>>) {
+    for link_id in state.borrow().link_ids_for_node(node_id) {
+        info!("Requesting removal of link {link_id} from node {node_id}");
+        registry.destroy_global(link_id);
+    }
+}
+
+/// Create an audio adapter backed by PipeWire's null-audio node.
+///
+/// A virtual output accepts audio from applications and exposes monitor output
+/// ports for routing. A virtual input exposes ports that can be fed by the graph.
+fn create_virtual_device(
+    id: u32,
+    name: String,
+    kind: VirtualDeviceKind,
+    channels: VirtualDeviceChannels,
+    core: &Core,
+    virtual_devices: &Rc<RefCell<HashMap<u32, Node>>>,
+    sender: &async_channel::Sender<PipewireMessage>,
+) {
+    let node_name = virtual_node_name(id, &name);
+    let audio_position = match channels {
+        VirtualDeviceChannels::Mono => "MONO",
+        VirtualDeviceChannels::Stereo => "FL,FR",
+    };
+
+    let result = match kind {
+        VirtualDeviceKind::Sink => core.create_object::<Node>(
+            "adapter",
+            &properties! {
+                "factory.name" => "support.null-audio-sink",
+                "node.name" => node_name.as_str(),
+                "node.description" => name.as_str(),
+                "media.class" => "Audio/Sink",
+                "audio.position" => audio_position,
+                "node.virtual" => "true",
+                "node.autoconnect" => "false",
+                "monitor.channel-volumes" => "true",
+                "application.name" => "Conduit"
+            },
+        ),
+        VirtualDeviceKind::Source => core.create_object::<Node>(
+            "adapter",
+            &properties! {
+                "factory.name" => "support.null-audio-sink",
+                "node.name" => node_name.as_str(),
+                "node.description" => name.as_str(),
+                "media.class" => "Audio/Source/Virtual",
+                "audio.position" => audio_position,
+                "node.virtual" => "true",
+                "node.autoconnect" => "false",
+                "monitor.passthrough" => "true",
+                "application.name" => "Conduit"
+            },
+        ),
+    };
+
+    match result {
+        Ok(node) => {
+            info!("Created virtual audio device '{name}'");
+            virtual_devices.borrow_mut().insert(id, node);
+            sender
+                .send_blocking(PipewireMessage::VirtualDeviceCreated {
+                    id,
+                    name,
+                    kind,
+                    channels,
+                })
+                .expect("Failed to send message");
+        }
+        Err(error) => {
+            warn!("Failed to create virtual audio device: {error}");
+            sender
+                .send_blocking(PipewireMessage::VirtualDeviceError {
+                    message: format!("Could not create the virtual device: {error}"),
+                })
+                .expect("Failed to send message");
+        }
+    }
+}
+
+fn remove_virtual_device(
+    id: u32,
+    core: &Core,
+    virtual_devices: &Rc<RefCell<HashMap<u32, Node>>>,
+    sender: &async_channel::Sender<PipewireMessage>,
+) {
+    let Some(node) = virtual_devices.borrow_mut().remove(&id) else {
+        sender
+            .send_blocking(PipewireMessage::VirtualDeviceError {
+                message: "That virtual device is no longer available.".to_string(),
+            })
+            .expect("Failed to send message");
+        return;
+    };
+
+    match core.destroy_object(node) {
+        Ok(_) => sender
+            .send_blocking(PipewireMessage::VirtualDeviceRemoved { id })
+            .expect("Failed to send message"),
+        Err(error) => {
+            warn!("Failed to remove virtual audio device: {error}");
+            sender
+                .send_blocking(PipewireMessage::VirtualDeviceError {
+                    message: format!("Could not remove the virtual device: {error}"),
+                })
+                .expect("Failed to send message");
+        }
+    }
+}
+
+fn virtual_node_name(id: u32, description: &str) -> String {
+    let slug: String = description
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    let slug = slug.trim_matches('_');
+    if slug.is_empty() {
+        format!("conduit.virtual.{id}")
+    } else {
+        format!("conduit.virtual.{id}.{slug}")
+    }
+}
+
 /// Get the nicest possible name for the node, using a fallback chain of possible name attributes
 fn get_node_name(props: &DictRef) -> &str {
     props
@@ -235,16 +454,26 @@ fn get_node_name(props: &DictRef) -> &str {
 fn handle_node(
     node: &GlobalObject<&DictRef>,
     sender: &async_channel::Sender<PipewireMessage>,
-    registry: &Rc<Registry>,
+    registry: &Registry,
     proxies: &Rc<RefCell<HashMap<u32, ProxyItem>>>,
     state: &Rc<RefCell<State>>,
 ) {
+    let node_id = node.id;
     let props = node
         .props
         .as_ref()
         .expect("Node object is missing properties");
 
     let name = get_node_name(props).to_string();
+    let channels = props
+        .get("audio.channels")
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|channels| *channels > 0)
+        .unwrap_or(2);
+    let layout_key = props
+        .get(&keys::NODE_NAME)
+        .unwrap_or(name.as_str())
+        .to_string();
     let media_class = |class: &str| {
         if class.contains("Sink") || class.contains("Input") {
             Some(NodeType::Input)
@@ -272,7 +501,9 @@ fn handle_node(
         .send_blocking(PipewireMessage::NodeAdded {
             id: node.id,
             name,
+            layout_key,
             node_type,
+            is_meter: is_meter(props),
         })
         .expect("Failed to send message");
 
@@ -282,15 +513,42 @@ fn handle_node(
         .info(clone!(@strong sender, @strong proxies => move |info| {
             handle_node_info(info, &sender, &proxies);
         }))
+        .param(clone!(@strong sender => move |_, param_type, _, _, param| {
+            if param_type == ParamType::Props {
+                handle_node_props(param, node_id, &sender);
+            }
+        }))
         .register();
+    proxy.subscribe_params(&[ParamType::Props]);
+    proxy.enum_params(0, Some(ParamType::Props), 0, u32::MAX);
 
     proxies.borrow_mut().insert(
         node.id,
         ProxyItem::Node {
             _proxy: proxy,
             _listener: listener,
+            channels,
         },
     );
+}
+
+fn handle_node_props(
+    param: Option<&pipewire::spa::pod::Pod>,
+    id: u32,
+    sender: &async_channel::Sender<PipewireMessage>,
+) {
+    let Some(Ok(object)) = param.map(pipewire::spa::pod::Pod::as_object) else {
+        return;
+    };
+    let Some(prop) = object.find_prop(pipewire::spa::utils::Id(
+        pipewire::spa::sys::SPA_PROP_volume,
+    )) else {
+        return;
+    };
+    let volume = unsafe { *(prop.value().body().cast::<f32>()) };
+    sender
+        .send_blocking(PipewireMessage::NodeVolumeChanged { id, volume })
+        .expect("Failed to send message");
 }
 
 fn handle_node_info(
@@ -325,7 +583,7 @@ fn handle_node_info(
 fn handle_port(
     port: &GlobalObject<&DictRef>,
     sender: &async_channel::Sender<PipewireMessage>,
-    registry: &Rc<Registry>,
+    registry: &Registry,
     proxies: &Rc<RefCell<HashMap<u32, ProxyItem>>>,
     state: &Rc<RefCell<State>>,
 ) {
@@ -404,6 +662,8 @@ fn handle_port_info(
                 node_id,
                 name,
                 direction: info.direction(),
+                is_monitor: property_is_true(props, "port.monitor"),
+                is_meter: is_meter(props),
             })
             .expect("Failed to send message");
     }
@@ -431,7 +691,7 @@ fn handle_port_enum_format(
 fn handle_link(
     link: &GlobalObject<&DictRef>,
     sender: &async_channel::Sender<PipewireMessage>,
-    registry: &Rc<Registry>,
+    registry: &Registry,
     proxies: &Rc<RefCell<HashMap<u32, ProxyItem>>>,
     state: &Rc<RefCell<State>>,
 ) {
@@ -508,8 +768,8 @@ fn handle_link_info(
 fn toggle_link(
     port_from: u32,
     port_to: u32,
-    core: &Rc<Core>,
-    registry: &Rc<Registry>,
+    core: &Core,
+    registry: &Registry,
     state: &Rc<RefCell<State>>,
 ) {
     let state = state.borrow_mut();

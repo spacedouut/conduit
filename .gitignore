@@ -3,3 +3,11 @@
 /.vscode
 /_build
 /target
+
+/.cargo/config.toml
+
+# Local build and rescue artifacts
+*.flatpak
+*.bundle
+/0001-*.patch
+/Pasted image.png

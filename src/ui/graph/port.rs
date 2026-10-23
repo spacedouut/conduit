@@ -81,7 +81,7 @@ mod imp {
 
     #[glib::object_subclass]
     impl ObjectSubclass for Port {
-        const NAME: &'static str = "HelvumPort";
+        const NAME: &'static str = "ConduitPort";
         type Type = super::Port;
         type ParentType = gtk::Widget;
 

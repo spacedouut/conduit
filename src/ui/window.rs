@@ -18,13 +18,25 @@ mod imp {
         #[property(type = gtk::Label, get = |_| self.current_remote_label.clone())]
         pub current_remote_label: TemplateChild<gtk::Label>,
         #[template_child]
+        #[property(type = gtk::Button, get = |_| self.create_virtual_device_button.clone())]
+        pub create_virtual_device_button: TemplateChild<gtk::Button>,
+        #[template_child]
+        #[property(type = gtk::Button, get = |_| self.manage_virtual_devices_button.clone())]
+        pub manage_virtual_devices_button: TemplateChild<gtk::Button>,
+        #[template_child]
+        #[property(type = gtk::CheckButton, get = |_| self.show_monitor_ports_button.clone())]
+        pub show_monitor_ports_button: TemplateChild<gtk::CheckButton>,
+        #[template_child]
+        #[property(type = gtk::Button, get = |_| self.edit_node_filters_button.clone())]
+        pub edit_node_filters_button: TemplateChild<gtk::Button>,
+        #[template_child]
         #[property(type = graph::GraphView, get = |_| self.graph.clone())]
         pub graph: TemplateChild<graph::GraphView>,
     }
 
     #[glib::object_subclass]
     impl ObjectSubclass for Window {
-        const NAME: &'static str = "HelvumWindow";
+        const NAME: &'static str = "ConduitWindow";
         type Type = super::Window;
         type ParentType = adw::ApplicationWindow;
 
@@ -44,7 +56,12 @@ mod imp {
     #[glib::derived_properties]
     impl ObjectImpl for Window {}
     impl WidgetImpl for Window {}
-    impl WindowImpl for Window {}
+    impl WindowImpl for Window {
+        fn close_request(&self) -> glib::Propagation {
+            self.obj().hide();
+            glib::Propagation::Stop
+        }
+    }
     impl ApplicationWindowImpl for Window {}
     impl AdwApplicationWindowImpl for Window {}
 }

@@ -1,17 +1,28 @@
-Helvum is a GTK-based patchbay for pipewire, inspired by the JACK tool [catia](https://kx.studio/Applications:Catia).
+Conduit is a GTK4 patchbay for PipeWire, built for visual routing across audio, video, and MIDI devices. It is based on [Helvum](https://gitlab.freedesktop.org/pipewire/helvum) and inspired by the JACK tool [Catia](https://kx.studio/Applications:Catia).
 
 ![Screenshot](docs/screenshot.png)
 
-<a href="https://flathub.org/apps/details/org.pipewire.Helvum"><img src="https://flathub.org/assets/badges/flathub-badge-en.png" width="300"/></a>
+Conduit can also create session-scoped virtual inputs and outputs for more complex routing setups.
 
-<a href="https://repology.org/project/helvum/versions"><img src="https://repology.org/badge/vertical-allrepos/helvum.svg" width="300"/></a>
+# Installing and updating
 
-# Features planned
+Every push to `main` is built by GitHub Actions and published to a signed Flatpak
+repository at <https://spacedouut.github.io/conduit/>.
 
-- Volume control
-- "Debug mode" that lets you view advanced information for nodes and ports
+Install Conduit from the repository, then keep it up to date with Flatpak:
 
-More suggestions are welcome!
+```shell
+$ flatpak install --user https://spacedouut.github.io/conduit/io.github.spacedouut.Conduit.flatpakref
+$ flatpak update --user io.github.spacedouut.Conduit
+```
+
+Or add the repository explicitly:
+
+```shell
+$ flatpak remote-add --user --if-not-exists conduit https://spacedouut.github.io/conduit/conduit.flatpakrepo
+$ flatpak install --user conduit io.github.spacedouut.Conduit
+$ flatpak update --user io.github.spacedouut.Conduit
+```
 
 # Building
 
@@ -23,17 +34,17 @@ $ flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.fl
 
 Then install the required flatpak platform and SDK, if you dont have them already:
 ```shell
-$ flatpak install org.gnome.{Platform,Sdk}//46 org.freedesktop.Sdk.Extension.rust-stable//23.08 org.freedesktop.Sdk.Extension.llvm16//23.08
+$ flatpak install org.gnome.{Platform,Sdk}//49 org.freedesktop.Sdk.Extension.rust-stable//25.08 org.freedesktop.Sdk.Extension.llvm20//25.08
 ```
 
 To compile and install as a flatpak, clone the project, change to the project directory, and run:
 ```shell
-$ flatpak-builder --install flatpak-build/ build-aux/org.pipewire.Helvum.json
+$ flatpak-builder --install flatpak-build/ build-aux/io.github.spacedouut.Conduit.json
 ```
 
 You can then run the app via
 ```shell
-$ flatpak run org.pipewire.Helvum
+$ flatpak run io.github.spacedouut.Conduit
 ```
 
 ## Manually
@@ -55,9 +66,11 @@ $ meson install
 in the repository root.
 This will install the compiled project files into `/usr/local`.
 
-# License and Credits
-Helvum is distributed under the terms of the GPL3 license.
+# License and credits
+Conduit is distributed under the terms of the GPL3 license.
 See LICENSE for more information.
+
+Conduit is derived from Helvum by Tom A. Wagner and its contributors. Their copyright notices are retained in the source.
 
 Parts of the build system were taken from the [gtk-rust-template](https://gitlab.gnome.org/World/Rust/gtk-rust-template) project,
 which is provided under the terms of the [MIT license](https://gitlab.gnome.org/World/Rust/gtk-rust-template/-/blob/master/LICENSE.md).

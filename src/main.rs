@@ -76,6 +76,8 @@ pub enum PipewireMessage {
         layout_key: String,
         node_type: Option<NodeType>,
         is_meter: bool,
+        /// An application stream, routed by the session manager.
+        is_stream: bool,
     },
     NodeNameChanged {
         id: u32,

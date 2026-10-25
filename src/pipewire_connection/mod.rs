@@ -563,6 +563,9 @@ fn handle_node(
             layout_key,
             node_type,
             is_meter: is_meter(props),
+            is_stream: props
+                .get("media.class")
+                .is_some_and(|class| class.starts_with("Stream/")),
         })
         .expect("Failed to send message");
 

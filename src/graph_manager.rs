@@ -109,6 +109,9 @@ mod imp {
         pub(super) pending_virtual_device_saves: RefCell<HashMap<u32, bool>>,
         pub next_virtual_device_id: Cell<u32>,
         port_info: RefCell<HashMap<u32, super::PortInfo>>,
+        node_is_stream: RefCell<HashMap<u32, bool>>,
+        /// Links the user asked for in Conduit, by `(output, input)` port.
+        user_links: RefCell<HashSet<(u32, u32)>>,
         link_ports: RefCell<HashMap<u32, (u32, u32)>>,
         /// Saved links that just disappeared and are waiting on
         /// `LINK_FORGET_DELAY`; they are not restored meanwhile.
@@ -141,7 +144,11 @@ mod imp {
                         layout_key,
                         node_type,
                         is_meter,
-                    } => self.add_node(id, name.as_str(), layout_key, node_type, is_meter),
+                        is_stream,
+                    } => {
+                        self.node_is_stream.borrow_mut().insert(id, is_stream);
+                        self.add_node(id, name.as_str(), layout_key, node_type, is_meter)
+                    }
                     PipewireMessage::NodeNameChanged {
                         id,
                         name,
@@ -338,6 +345,7 @@ mod imp {
             self.node_is_meter.borrow_mut().remove(&id);
             self.node_layout_keys.borrow_mut().remove(&id);
             self.pending_volume_restores.borrow_mut().remove(&id);
+            self.node_is_stream.borrow_mut().remove(&id);
             self.port_visibility
                 .borrow_mut()
                 .retain(|_, port| port.node_id != id);
@@ -484,9 +492,17 @@ mod imp {
             self.requested_links
                 .borrow_mut()
                 .remove(&(output_port_id, input_port_id));
+            let user_made = self
+                .user_links
+                .borrow_mut()
+                .remove(&(output_port_id, input_port_id));
             if let Some(saved) = self.saved_link(output_port_id, input_port_id) {
                 self.suspended_links.borrow_mut().remove(&saved);
-                self.saved_virtual_devices.borrow_mut().add_link(saved);
+                // The session manager links app streams to the default device on
+                // its own; only keep those when the user made them here.
+                if user_made || !self.link_touches_stream(output_port_id, input_port_id) {
+                    self.saved_virtual_devices.borrow_mut().add_link(saved);
+                }
             }
 
             let mut items = self.items.borrow_mut();
@@ -565,6 +581,7 @@ mod imp {
 
         // Toggle a link between the two specified ports on the remote pipewire server.
         fn toggle_link(&self, port_from: u32, port_to: u32) {
+            self.user_links.borrow_mut().insert((port_from, port_to));
             let sender = self.pw_sender.get().expect("pw_sender shoud be set");
             sender
                 .send(crate::GtkMessage::ToggleLink { port_from, port_to })
@@ -607,6 +624,8 @@ mod imp {
             self.link_ports.borrow_mut().clear();
             self.requested_links.borrow_mut().clear();
             self.pending_volume_restores.borrow_mut().clear();
+            self.node_is_stream.borrow_mut().clear();
+            self.user_links.borrow_mut().clear();
             self.obj().graph().clear();
         }
 
@@ -625,6 +644,18 @@ mod imp {
             let store = self.saved_virtual_devices.borrow();
             (store.contains_node(&link.output_node) || store.contains_node(&link.input_node))
                 .then_some(link)
+        }
+
+        fn link_touches_stream(&self, output_port: u32, input_port: u32) -> bool {
+            let port_info = self.port_info.borrow();
+            let node_is_stream = self.node_is_stream.borrow();
+            [output_port, input_port].iter().any(|port| {
+                port_info
+                    .get(port)
+                    .and_then(|info| node_is_stream.get(&info.node_id))
+                    .copied()
+                    .unwrap_or(false)
+            })
         }
 
         /// Port ids currently matching each end of a saved link.

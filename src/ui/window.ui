@@ -5,6 +5,12 @@
   <menu id="primary_menu">
     <section>
       <item>
+        <attribute name="label">_Run on Startup</attribute>
+        <attribute name="action">app.autostart</attribute>
+      </item>
+    </section>
+    <section>
+      <item>
         <attribute name="label">_About Conduit</attribute>
         <attribute name="action">app.about</attribute>
       </item>
@@ -20,7 +26,7 @@
             <child type="start">
               <object class="GtkButton" id="create_virtual_device_button">
                 <property name="label" translatable="yes">Add virtual device</property>
-                <property name="tooltip-text" translatable="yes">Create a session-scoped audio input or output</property>
+                <property name="tooltip-text" translatable="yes">Create an audio input or output that Conduit recreates on launch</property>
                 <style>
                   <class name="suggested-action"/>
                   <class name="virtual-device-action"/>
@@ -31,7 +37,7 @@
               <object class="GtkButton" id="manage_virtual_devices_button">
                 <property name="label" translatable="yes">Manage</property>
                 <property name="sensitive">false</property>
-                <property name="tooltip-text" translatable="yes">Remove virtual devices created in this session</property>
+                <property name="tooltip-text" translatable="yes">Remove virtual devices Conduit recreates on launch</property>
               </object>
             </child>
             <property name="title-widget">

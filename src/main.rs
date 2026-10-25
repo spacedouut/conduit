@@ -15,6 +15,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 mod application;
+mod autostart;
 mod graph_manager;
 mod node_filter;
 mod node_layout;
@@ -35,6 +36,12 @@ pub enum GtkMessage {
         port_from: u32,
         port_to: u32,
     },
+    /// Create a link between the two ports unless one already exists.
+    CreateLink {
+        port_from: u32,
+        port_to: u32,
+    },
+    /// Set the linear volume of a node, keeping its channel balance.
     SetNodeVolume {
         node_id: u32,
         volume: f32,
@@ -46,6 +53,7 @@ pub enum GtkMessage {
     CreateVirtualDevice {
         id: u32,
         name: String,
+        node_name: String,
         kind: VirtualDeviceKind,
         channels: VirtualDeviceChannels,
     },
@@ -74,6 +82,7 @@ pub enum PipewireMessage {
         name: String,
         media_name: String,
     },
+    /// The loudest channel's linear volume.
     NodeVolumeChanged {
         id: u32,
         volume: f32,

@@ -36,7 +36,7 @@ const DEFAULT_REMOTE_NAME: &str = "Default Remote";
 mod imp {
     use super::*;
 
-    use std::cell::OnceCell;
+    use std::cell::{Cell, OnceCell};
 
     use adw::subclass::prelude::AdwApplicationImpl;
 
@@ -44,6 +44,10 @@ mod imp {
     pub struct Application {
         pub(super) window: ui::Window,
         pub(super) graph_manager: OnceCell<GraphManager>,
+        /// Set by `--hidden` (used by the autostart entry): the first
+        /// activation only starts Conduit in the tray.
+        pub(super) start_hidden: Cell<bool>,
+        pub(super) window_presented: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -70,7 +74,10 @@ mod imp {
             }));
             self.window.add_action(&zoom_set_action);
 
-            self.window.present();
+            // The hidden window still keeps the app alive for the tray.
+            if !self.start_hidden.replace(false) {
+                self.present_window();
+            }
         }
 
         fn startup(&self) {
@@ -113,6 +120,30 @@ mod imp {
                 })
                 .build();
             obj.add_action_entries([action_about]);
+
+            let autostart = gio::SimpleAction::new_stateful(
+                "autostart",
+                None,
+                &crate::autostart::is_enabled().to_variant(),
+            );
+            autostart.connect_activate(|action, _| {
+                let enable = !action
+                    .state()
+                    .and_then(|s| s.get::<bool>())
+                    .unwrap_or(false);
+                action.set_enabled(false);
+                let action = action.clone();
+                crate::autostart::set_enabled(enable, move |enabled| {
+                    action.set_state(&enabled.to_variant());
+                    action.set_enabled(true);
+                });
+            });
+            obj.add_action(&autostart);
+        }
+
+        pub(super) fn present_window(&self) {
+            self.window_presented.set(true);
+            self.window.present();
         }
 
         fn show_about_dialog(&self) {
@@ -147,8 +178,18 @@ mod imp {
                 Some("PATH"),
             );
 
+            obj.add_main_option(
+                "hidden",
+                glib::char::Char::from(0),
+                glib::OptionFlags::NONE,
+                glib::OptionArg::None,
+                "Start in the system tray without opening a window",
+                None,
+            );
+
             let current_remote_label = obj.imp().window.current_remote_label();
-            obj.connect_handle_local_options(clone!(@strong pw_sender => move |_, opts| {
+            obj.connect_handle_local_options(clone!(@strong pw_sender => move |app, opts| {
+                app.imp().start_hidden.set(opts.contains("hidden"));
                 match opts.lookup::<String>("socket") {
                     Ok(p) => {
                         current_remote_label.set_label(p.as_deref().unwrap_or(DEFAULT_REMOTE_NAME));
@@ -198,7 +239,15 @@ impl Application {
         glib::MainContext::default().spawn_local(clone!(@strong app => async move {
             while let Ok(action) = tray_receiver.recv().await {
                 match action {
-                    crate::tray::Action::ShowWindow => app.imp().window.present(),
+                    crate::tray::Action::ShowWindow => app.imp().present_window(),
+                    crate::tray::Action::WindowUnreachable => {
+                        if app.imp().start_hidden.get() || !app.imp().window_presented.get() {
+                            app.imp().start_hidden.set(false);
+                            if app.imp().window.application().is_some() {
+                                app.imp().present_window();
+                            }
+                        }
+                    }
                     crate::tray::Action::Quit => app.quit(),
                 }
             }

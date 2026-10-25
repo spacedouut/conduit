@@ -21,15 +21,38 @@ use adw::{
     subclass::prelude::*,
 };
 
-use pipewire::channel::Sender as PwSender;
+use pipewire::{channel::Sender as PwSender, spa::utils::Direction};
 
 use crate::{
     ui::{
         graph::{GraphView, Node},
         Window,
     },
+    virtual_device_store::SavedLink,
     GtkMessage, PipewireMessage, VirtualDeviceChannels, VirtualDeviceKind,
 };
+
+/// How long to wait after a link disappears before deciding it was removed on
+/// purpose. If an endpoint goes away in that window (app closed, Conduit or
+/// PipeWire shutting down) the link is kept and restored later.
+const LINK_FORGET_DELAY: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// Volume sliders use the cubic scale desktop mixers show, so 50% here
+/// matches 50% in pavucontrol or GNOME Settings.
+fn slider_from_linear(volume: f32) -> f64 {
+    (volume.max(0.0) as f64).cbrt()
+}
+
+fn linear_from_slider(value: f64) -> f32 {
+    value.max(0.0).powi(3) as f32
+}
+
+#[derive(Clone)]
+struct PortInfo {
+    node_id: u32,
+    name: String,
+    direction: Direction,
+}
 
 #[derive(Clone)]
 pub(super) struct VirtualDevice {
@@ -48,7 +71,12 @@ struct PortVisibility {
 mod imp {
     use super::*;
 
-    use std::{cell::Cell, cell::OnceCell, cell::RefCell, collections::HashMap};
+    use std::{
+        cell::Cell,
+        cell::OnceCell,
+        cell::RefCell,
+        collections::{HashMap, HashSet},
+    };
 
     use crate::{ui::graph, MediaType, NodeType};
 
@@ -80,6 +108,14 @@ mod imp {
         pub(super) saved_virtual_devices: RefCell<crate::virtual_device_store::Store>,
         pub(super) pending_virtual_device_saves: RefCell<HashMap<u32, bool>>,
         pub next_virtual_device_id: Cell<u32>,
+        port_info: RefCell<HashMap<u32, super::PortInfo>>,
+        link_ports: RefCell<HashMap<u32, (u32, u32)>>,
+        /// Saved links that just disappeared and are waiting on
+        /// `LINK_FORGET_DELAY`; they are not restored meanwhile.
+        suspended_links: RefCell<HashSet<SavedLink>>,
+        requested_links: RefCell<HashSet<(u32, u32)>>,
+        pending_volume_restores: RefCell<HashSet<u32>>,
+        link_restore_queued: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -191,13 +227,16 @@ mod imp {
                 .clone();
             node.volume_scale().connect_value_changed(
                 glib::clone!(@strong sender, @weak node => move |scale| {
+                    if node.is_syncing_volume() {
+                        return;
+                    }
                     if (scale.value() - 1.0).abs() <= 0.02 && scale.value() != 1.0 {
                         scale.set_value(1.0);
                         return;
                     }
                     sender.send(GtkMessage::SetNodeVolume {
                         node_id: node.pipewire_id(),
-                        volume: scale.value() as f32,
+                        volume: super::linear_from_slider(scale.value()),
                     }).expect("Failed to send message");
                 }),
             );
@@ -214,6 +253,15 @@ mod imp {
                     None
                 }),
             );
+
+            if self
+                .saved_virtual_devices
+                .borrow()
+                .volume(&layout_key)
+                .is_some()
+            {
+                self.pending_volume_restores.borrow_mut().insert(id);
+            }
 
             self.items.borrow_mut().insert(id, node.clone().upcast());
             self.node_is_meter.borrow_mut().insert(id, is_meter);
@@ -254,8 +302,32 @@ mod imp {
             let Ok(node) = item.dynamic_cast::<graph::Node>() else {
                 return;
             };
-            if (node.volume_scale().value() - volume as f64).abs() > 0.001 {
-                node.volume_scale().set_value(volume as f64);
+            let Some(key) = self.node_layout_keys.borrow().get(&id).cloned() else {
+                return;
+            };
+
+            if self.pending_volume_restores.borrow_mut().remove(&id) {
+                let saved = self.saved_virtual_devices.borrow().volume(&key);
+                if let Some(saved) = saved.filter(|saved| (saved - volume).abs() > 0.0001) {
+                    log::info!("Restoring volume {saved} on {key}");
+                    self.pw_sender
+                        .get()
+                        .expect("pw_sender should be set")
+                        .send(GtkMessage::SetNodeVolume {
+                            node_id: id,
+                            volume: saved,
+                        })
+                        .expect("Failed to send message");
+                    node.set_remote_volume(super::slider_from_linear(saved));
+                    return;
+                }
+            }
+
+            node.set_remote_volume(super::slider_from_linear(volume));
+            if self.saved_virtual_devices.borrow().contains_node(&key) {
+                self.saved_virtual_devices
+                    .borrow_mut()
+                    .set_volume(&key, volume);
             }
         }
 
@@ -265,6 +337,7 @@ mod imp {
 
             self.node_is_meter.borrow_mut().remove(&id);
             self.node_layout_keys.borrow_mut().remove(&id);
+            self.pending_volume_restores.borrow_mut().remove(&id);
             self.port_visibility
                 .borrow_mut()
                 .retain(|_, port| port.node_id != id);
@@ -305,6 +378,14 @@ mod imp {
             };
 
             let port = graph::Port::new(id, name, direction);
+            self.port_info.borrow_mut().insert(
+                id,
+                super::PortInfo {
+                    node_id,
+                    name: name.to_string(),
+                    direction,
+                },
+            );
 
             self.port_visibility.borrow_mut().insert(
                 id,
@@ -335,6 +416,7 @@ mod imp {
             node.add_port(port);
             drop(items);
             self.refresh_item_visibility();
+            self.queue_link_restore();
         }
 
         fn port_media_type_changed(&self, id: u32, media_type: MediaType) {
@@ -358,6 +440,10 @@ mod imp {
             log::info!("Removing port from graph: id {}, node_id: {}", id, node_id);
 
             self.port_visibility.borrow_mut().remove(&id);
+            self.port_info.borrow_mut().remove(&id);
+            self.requested_links
+                .borrow_mut()
+                .retain(|(from, to)| *from != id && *to != id);
 
             let mut items = self.items.borrow_mut();
 
@@ -391,6 +477,17 @@ mod imp {
             media_type: MediaType,
         ) {
             log::info!("Adding link to graph: id {}", id);
+
+            self.link_ports
+                .borrow_mut()
+                .insert(id, (output_port_id, input_port_id));
+            self.requested_links
+                .borrow_mut()
+                .remove(&(output_port_id, input_port_id));
+            if let Some(saved) = self.saved_link(output_port_id, input_port_id) {
+                self.suspended_links.borrow_mut().remove(&saved);
+                self.saved_virtual_devices.borrow_mut().add_link(saved);
+            }
 
             let mut items = self.items.borrow_mut();
 
@@ -478,6 +575,17 @@ mod imp {
         fn remove_link(&self, id: u32) {
             log::info!("Removing link from graph: id {}", id);
 
+            let ports = self.link_ports.borrow_mut().remove(&id);
+            if let Some(saved) = ports.and_then(|(from, to)| self.saved_link(from, to)) {
+                self.suspended_links.borrow_mut().insert(saved.clone());
+                let manager = self.obj().downgrade();
+                glib::timeout_add_local_once(super::LINK_FORGET_DELAY, move || {
+                    if let Some(manager) = manager.upgrade() {
+                        manager.imp().settle_removed_link(saved);
+                    }
+                });
+            }
+
             let Some(link) = self.items.borrow_mut().remove(&id) else {
                 log::warn!("Unknown Link (id={id}) removed from graph");
                 return;
@@ -495,7 +603,110 @@ mod imp {
             self.node_is_meter.borrow_mut().clear();
             self.node_layout_keys.borrow_mut().clear();
             self.port_visibility.borrow_mut().clear();
+            self.port_info.borrow_mut().clear();
+            self.link_ports.borrow_mut().clear();
+            self.requested_links.borrow_mut().clear();
+            self.pending_volume_restores.borrow_mut().clear();
             self.obj().graph().clear();
+        }
+
+        /// The persistent form of a link, if it touches a saved virtual device.
+        fn saved_link(&self, output_port: u32, input_port: u32) -> Option<SavedLink> {
+            let port_info = self.port_info.borrow();
+            let keys = self.node_layout_keys.borrow();
+            let output = port_info.get(&output_port)?;
+            let input = port_info.get(&input_port)?;
+            let link = SavedLink {
+                output_node: keys.get(&output.node_id)?.clone(),
+                output_port: output.name.clone(),
+                input_node: keys.get(&input.node_id)?.clone(),
+                input_port: input.name.clone(),
+            };
+            let store = self.saved_virtual_devices.borrow();
+            (store.contains_node(&link.output_node) || store.contains_node(&link.input_node))
+                .then_some(link)
+        }
+
+        /// Port ids currently matching each end of a saved link.
+        fn resolve_link(&self, link: &SavedLink) -> (Vec<u32>, Vec<u32>) {
+            let port_info = self.port_info.borrow();
+            let keys = self.node_layout_keys.borrow();
+            let find = |node: &str, port: &str, direction: Direction| {
+                port_info
+                    .iter()
+                    .filter(|(_, info)| {
+                        info.direction == direction
+                            && info.name == port
+                            && keys.get(&info.node_id).is_some_and(|key| key == node)
+                    })
+                    .map(|(id, _)| *id)
+                    .collect::<Vec<_>>()
+            };
+            (
+                find(&link.output_node, &link.output_port, Direction::Output),
+                find(&link.input_node, &link.input_port, Direction::Input),
+            )
+        }
+
+        fn settle_removed_link(&self, link: SavedLink) {
+            if !self.suspended_links.borrow_mut().remove(&link) {
+                return;
+            }
+            let (outputs, inputs) = self.resolve_link(&link);
+            let link_ports = self.link_ports.borrow();
+            let still_linked = link_ports
+                .values()
+                .any(|(from, to)| outputs.contains(from) && inputs.contains(to));
+            if !outputs.is_empty() && !inputs.is_empty() && !still_linked {
+                drop(link_ports);
+                log::info!("Forgetting link that was removed on purpose: {link:?}");
+                self.saved_virtual_devices.borrow_mut().remove_link(&link);
+            }
+        }
+
+        fn queue_link_restore(&self) {
+            if self.link_restore_queued.replace(true) {
+                return;
+            }
+            let manager = self.obj().downgrade();
+            glib::idle_add_local_once(move || {
+                if let Some(manager) = manager.upgrade() {
+                    manager.imp().link_restore_queued.set(false);
+                    manager.imp().restore_saved_links();
+                }
+            });
+        }
+
+        /// Reconnect saved virtual device links whose endpoints both exist.
+        fn restore_saved_links(&self) {
+            let links = self.saved_virtual_devices.borrow().links().to_vec();
+            let suspended = self.suspended_links.borrow().clone();
+            for link in links.iter().filter(|link| !suspended.contains(link)) {
+                let (outputs, inputs) = self.resolve_link(link);
+                for &port_from in &outputs {
+                    for &port_to in &inputs {
+                        let linked = self
+                            .link_ports
+                            .borrow()
+                            .values()
+                            .any(|ports| *ports == (port_from, port_to));
+                        if linked
+                            || !self
+                                .requested_links
+                                .borrow_mut()
+                                .insert((port_from, port_to))
+                        {
+                            continue;
+                        }
+                        log::info!("Restoring link {link:?}");
+                        self.pw_sender
+                            .get()
+                            .expect("pw_sender should be set")
+                            .send(GtkMessage::CreateLink { port_from, port_to })
+                            .expect("Failed to send message");
+                    }
+                }
+            }
         }
 
         pub(super) fn refresh_item_visibility(&self) {
@@ -612,7 +823,8 @@ mod imp {
         }
 
         fn recreate_saved_virtual_devices(&self) {
-            for device in self.saved_virtual_devices.borrow().devices().to_vec() {
+            let devices = self.saved_virtual_devices.borrow().devices();
+            for device in devices {
                 self.obj().request_create_virtual_device(
                     &device.name,
                     device.kind,
@@ -705,7 +917,7 @@ impl GraphManager {
             .build();
 
         let introduction = gtk::Label::new(Some(
-            "Create a routable endpoint that lasts until Conduit closes.",
+            "Create a routable endpoint. Conduit recreates it, with its volume and connections, every time it starts.",
         ));
         introduction.set_xalign(0.0);
         introduction.set_wrap(true);
@@ -851,12 +1063,19 @@ impl GraphManager {
         imp.pending_virtual_device_saves
             .borrow_mut()
             .insert(id, save);
+        let node_name = crate::virtual_device_store::Definition {
+            name: name.to_string(),
+            kind,
+            channels,
+        }
+        .node_name();
         imp.pw_sender
             .get()
             .expect("pw_sender should be set")
             .send(GtkMessage::CreateVirtualDevice {
                 id,
                 name: name.to_string(),
+                node_name,
                 kind,
                 channels,
             })

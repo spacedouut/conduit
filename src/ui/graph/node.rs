@@ -63,6 +63,8 @@ mod imp {
         #[template_child]
         pub(super) volume_scale: TemplateChild<gtk::Scale>,
         pub(super) show_volume_sliders: Cell<bool>,
+        pub(super) has_volume: Cell<bool>,
+        pub(super) syncing_volume: Cell<bool>,
         pub(super) ports: RefCell<HashSet<Port>>,
     }
 
@@ -203,7 +205,31 @@ impl Node {
     }
     pub fn set_show_volume_sliders(&self, show: bool) {
         self.imp().show_volume_sliders.set(show);
-        self.volume_scale().set_visible(show);
+        self.update_volume_scale_visibility();
+    }
+
+    /// Reflect a volume reported by PipeWire without echoing it back.
+    pub fn set_remote_volume(&self, value: f64) {
+        let imp = self.imp();
+        imp.has_volume.set(true);
+        self.update_volume_scale_visibility();
+        if (imp.volume_scale.value() - value).abs() > 0.0005 {
+            imp.syncing_volume.set(true);
+            imp.volume_scale.set_value(value);
+            imp.syncing_volume.set(false);
+        }
+    }
+
+    pub fn is_syncing_volume(&self) -> bool {
+        self.imp().syncing_volume.get()
+    }
+
+    fn update_volume_scale_visibility(&self) {
+        let imp = self.imp();
+        // Nodes without a volume (video, MIDI, ...) never report one, so their
+        // slider would do nothing.
+        imp.volume_scale
+            .set_visible(imp.show_volume_sliders.get() && imp.has_volume.get());
     }
     pub fn new(name: &str, pipewire_id: u32) -> Self {
         glib::Object::builder()

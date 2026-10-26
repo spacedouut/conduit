@@ -11,6 +11,7 @@ use ksni::{
 #[derive(Clone, Copy)]
 pub enum Action {
     ShowWindow,
+    WindowUnreachable,
     Quit,
 }
 
@@ -60,6 +61,8 @@ impl ksni::Tray for ConduitTray {
     }
 
     fn watcher_offline(&self, _: ksni::OfflineReason) -> bool {
+        // Without a tray host there's no way back to a hidden window.
+        let _ = self.action_sender.try_send(Action::WindowUnreachable);
         true
     }
 }
@@ -68,12 +71,24 @@ pub fn spawn(action_sender: Sender<Action>) {
     std::thread::Builder::new()
         .name("conduit-tray".into())
         .spawn(move || {
-            let tray = ConduitTray { action_sender };
-            match tray.assume_sni_available(true).spawn() {
+            let tray = ConduitTray {
+                action_sender: action_sender.clone(),
+            };
+            // Flatpak apps may only own names under their app id, so skip the
+            // well-known StatusNotifierItem name there.
+            let sandboxed = std::path::Path::new("/.flatpak-info").exists();
+            match tray
+                .disable_dbus_name(sandboxed)
+                .assume_sni_available(true)
+                .spawn()
+            {
                 Ok(_handle) => loop {
                     std::thread::park();
                 },
-                Err(error) => log::warn!("Could not start system tray icon: {error}"),
+                Err(error) => {
+                    log::warn!("Could not start system tray icon: {error}");
+                    let _ = action_sender.try_send(Action::WindowUnreachable);
+                }
             }
         })
         .expect("Could not start system tray thread");

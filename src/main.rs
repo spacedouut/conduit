@@ -16,6 +16,7 @@
 
 mod application;
 mod autostart;
+mod comment_store;
 mod graph_manager;
 mod node_filter;
 mod node_layout;

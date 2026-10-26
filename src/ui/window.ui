@@ -40,6 +40,12 @@
                 <property name="tooltip-text" translatable="yes">Remove virtual devices Conduit recreates on launch</property>
               </object>
             </child>
+            <child type="start">
+              <object class="GtkButton" id="add_comment_button">
+                <property name="label" translatable="yes">Add comment</property>
+                <property name="tooltip-text" translatable="yes">Put a note on the graph</property>
+              </object>
+            </child>
             <property name="title-widget">
               <object class="GtkBox">
                 <property name="orientation">vertical</property>

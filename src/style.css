@@ -41,6 +41,15 @@ node {
     border-radius: 12px;
 }
 
+node.comment {
+    background-color: mix(@card_bg_color, @accent_bg_color, 0.12);
+}
+
+node.comment textview,
+node.comment textview text {
+    background: transparent;
+}
+
 node .node-title {
 	padding: 4px 7px;
 }

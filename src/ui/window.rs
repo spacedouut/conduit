@@ -24,6 +24,9 @@ mod imp {
         #[property(type = gtk::Button, get = |_| self.manage_virtual_devices_button.clone())]
         pub manage_virtual_devices_button: TemplateChild<gtk::Button>,
         #[template_child]
+        #[property(type = gtk::Button, get = |_| self.add_comment_button.clone())]
+        pub add_comment_button: TemplateChild<gtk::Button>,
+        #[template_child]
         #[property(type = gtk::CheckButton, get = |_| self.show_monitor_ports_button.clone())]
         pub show_monitor_ports_button: TemplateChild<gtk::CheckButton>,
         #[template_child]

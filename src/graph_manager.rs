@@ -97,6 +97,8 @@ mod imp {
         node_is_meter: RefCell<HashMap<u32, bool>>,
         pub(super) node_layout_keys: RefCell<HashMap<u32, String>>,
         pub(super) node_layout: RefCell<crate::node_layout::NodeLayout>,
+        pub(super) comments: RefCell<crate::comment_store::CommentStore>,
+        pub(super) comment_ids: RefCell<HashMap<Node, u32>>,
         port_visibility: RefCell<HashMap<u32, super::PortVisibility>>,
         pub(super) show_monitor_ports: Cell<bool>,
         pub(super) show_meters: Cell<bool>,
@@ -914,6 +916,13 @@ impl GraphManager {
     }
 
     fn node_position_changed(&self, node: &Node, position: Point) {
+        if let Some(id) = self.imp().comment_ids.borrow().get(node) {
+            self.imp()
+                .comments
+                .borrow_mut()
+                .set_position(*id, position.x(), position.y());
+            return;
+        }
         let id = node.pipewire_id();
         let Some(layout_key) = self.imp().node_layout_keys.borrow().get(&id).cloned() else {
             return;
@@ -924,8 +933,48 @@ impl GraphManager {
             .set_position(layout_key, position.x(), position.y());
     }
 
+    fn add_comment_node(&self, id: u32, text: &str, position: Point) -> Node {
+        let node = Node::new_comment(text);
+        node.comment_buffer().connect_changed(
+            glib::clone!(@weak self as manager => move |buffer| {
+                let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+                manager.imp().comments.borrow_mut().set_text(id, &text);
+            }),
+        );
+        node.connect_local(
+            "delete-comment",
+            false,
+            glib::clone!(@weak self as manager => @default-return None, move |args| {
+                let node = args[0].get::<Node>().expect("signal is emitted by a node");
+                manager.imp().comment_ids.borrow_mut().remove(&node);
+                manager.imp().comments.borrow_mut().remove(id);
+                manager.graph().remove_node(&node);
+                None
+            }),
+        );
+        self.graph().add_node(node.clone(), None);
+        self.graph().set_node_position(&node, &position);
+        self.imp().comment_ids.borrow_mut().insert(node.clone(), id);
+        node
+    }
+
+    fn add_comment(&self) {
+        let center = self.graph().visible_center();
+        let position = Point::new(center.x() - 110.0, center.y() - 40.0);
+        let id = self
+            .imp()
+            .comments
+            .borrow_mut()
+            .add(position.x(), position.y());
+        let node = self.add_comment_node(id, "", position);
+        node.focus_comment();
+    }
+
     fn setup_virtual_device_controls(&self) {
         let window = self.window();
+        window
+            .add_comment_button()
+            .connect_clicked(glib::clone!(@weak self as manager => move |_| manager.add_comment()));
         window.create_virtual_device_button().connect_clicked(
             glib::clone!(@weak self as manager => move |_| {
                 manager.show_create_virtual_device_dialog();
@@ -1235,6 +1284,26 @@ impl GraphManager {
         );
 
         res.setup_virtual_device_controls();
+        res.imp()
+            .comments
+            .replace(crate::comment_store::CommentStore::load());
+        let saved_comments: Vec<_> = res
+            .imp()
+            .comments
+            .borrow()
+            .comments()
+            .iter()
+            .map(|comment| {
+                (
+                    comment.id,
+                    comment.text.clone(),
+                    Point::new(comment.x, comment.y),
+                )
+            })
+            .collect();
+        for (id, text, position) in saved_comments {
+            res.add_comment_node(id, &text, position);
+        }
         graph.set_node_position_changed_handler(glib::clone!(@weak res => move |node, position| {
             res.node_position_changed(node, position);
         }));

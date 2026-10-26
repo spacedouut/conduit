@@ -106,6 +106,7 @@ mod imp {
         pub(super) node_filter: RefCell<crate::node_filter::NodeFilter>,
         pub(super) virtual_devices: RefCell<HashMap<u32, super::VirtualDevice>>,
         pub(super) saved_virtual_devices: RefCell<crate::virtual_device_store::Store>,
+        pub(super) pw_connected: Cell<bool>,
         /// Whether to save each requested device, and its node name.
         pub(super) pending_virtual_device_saves: RefCell<HashMap<u32, (bool, String)>>,
         pub next_virtual_device_id: Cell<u32>,
@@ -202,11 +203,13 @@ mod imp {
                     }
                     PipewireMessage::Connected => {
                         self.obj().connection_banner().set_revealed(false);
-                        // Requests made while disconnected were dropped.
-                        self.pending_virtual_device_saves.borrow_mut().clear();
+                        self.pw_connected.set(true);
                         self.recreate_saved_virtual_devices();
                     }
                     PipewireMessage::Disconnected => {
+                        // PipeWire drops requests it gets while disconnected.
+                        self.pw_connected.set(false);
+                        self.pending_virtual_device_saves.borrow_mut().clear();
                         self.clear();
                         self.virtual_devices.borrow_mut().clear();
                         self.obj()
@@ -1107,6 +1110,10 @@ impl GraphManager {
         save: bool,
     ) {
         let imp = self.imp();
+        if !imp.pw_connected.get() {
+            imp.show_virtual_device_error("Not connected to PipeWire.");
+            return;
+        }
         let definition = crate::virtual_device_store::Definition {
             name: name.to_string(),
             kind,

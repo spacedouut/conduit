@@ -202,6 +202,8 @@ mod imp {
                     }
                     PipewireMessage::Connected => {
                         self.obj().connection_banner().set_revealed(false);
+                        // Requests made while disconnected were dropped.
+                        self.pending_virtual_device_saves.borrow_mut().clear();
                         self.recreate_saved_virtual_devices();
                     }
                     PipewireMessage::Disconnected => {

@@ -710,8 +710,8 @@ fn handle_node_info(
 
     let props = info.props().expect("NodeInfo object is missing properties");
     // card.profile.device isn't in the registry's global props, only here.
-    if route_device.is_none() {
-        *route_device = route_device_from_props(props);
+    if let Some(route) = route_device_from_props(props) {
+        *route_device = Some(route);
     }
     if let Some(media_name) = props.get(&keys::MEDIA_NAME) {
         let name = get_node_name(props).to_string();

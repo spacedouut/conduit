@@ -106,16 +106,19 @@ mod imp {
         pub(super) node_filter: RefCell<crate::node_filter::NodeFilter>,
         pub(super) virtual_devices: RefCell<HashMap<u32, super::VirtualDevice>>,
         pub(super) saved_virtual_devices: RefCell<crate::virtual_device_store::Store>,
-        pub(super) pending_virtual_device_saves: RefCell<HashMap<u32, bool>>,
+        pub(super) pw_connected: Cell<bool>,
+        /// Whether to save each requested device, and its node name.
+        pub(super) pending_virtual_device_saves: RefCell<HashMap<u32, (bool, String)>>,
         pub next_virtual_device_id: Cell<u32>,
         port_info: RefCell<HashMap<u32, super::PortInfo>>,
         node_is_stream: RefCell<HashMap<u32, bool>>,
         /// Links the user asked for in Conduit, by `(output, input)` port.
         user_links: RefCell<HashSet<(u32, u32)>>,
         link_ports: RefCell<HashMap<u32, (u32, u32)>>,
-        /// Saved links that just disappeared and are waiting on
-        /// `LINK_FORGET_DELAY`; they are not restored meanwhile.
-        suspended_links: RefCell<HashSet<SavedLink>>,
+        /// Saved links that just disappeared, with the ports they joined, waiting
+        /// on `LINK_FORGET_DELAY`; they are not restored meanwhile. If one of
+        /// those ports goes away first, the endpoint left and the link is kept.
+        suspended_links: RefCell<HashMap<SavedLink, (u32, u32)>>,
         requested_links: RefCell<HashSet<(u32, u32)>>,
         pending_volume_restores: RefCell<HashSet<u32>>,
         link_restore_queued: Cell<bool>,
@@ -200,9 +203,13 @@ mod imp {
                     }
                     PipewireMessage::Connected => {
                         self.obj().connection_banner().set_revealed(false);
+                        self.pw_connected.set(true);
                         self.recreate_saved_virtual_devices();
                     }
                     PipewireMessage::Disconnected => {
+                        // PipeWire drops requests it gets while disconnected.
+                        self.pw_connected.set(false);
+                        self.pending_virtual_device_saves.borrow_mut().clear();
                         self.clear();
                         self.virtual_devices.borrow_mut().clear();
                         self.obj()
@@ -449,6 +456,9 @@ mod imp {
 
             self.port_visibility.borrow_mut().remove(&id);
             self.port_info.borrow_mut().remove(&id);
+            self.suspended_links
+                .borrow_mut()
+                .retain(|_, (from, to)| *from != id && *to != id);
             self.requested_links
                 .borrow_mut()
                 .retain(|(from, to)| *from != id && *to != id);
@@ -581,7 +591,14 @@ mod imp {
 
         // Toggle a link between the two specified ports on the remote pipewire server.
         fn toggle_link(&self, port_from: u32, port_to: u32) {
-            self.user_links.borrow_mut().insert((port_from, port_to));
+            let linked = self
+                .link_ports
+                .borrow()
+                .values()
+                .any(|ports| *ports == (port_from, port_to));
+            if !linked {
+                self.user_links.borrow_mut().insert((port_from, port_to));
+            }
             let sender = self.pw_sender.get().expect("pw_sender shoud be set");
             sender
                 .send(crate::GtkMessage::ToggleLink { port_from, port_to })
@@ -593,8 +610,12 @@ mod imp {
             log::info!("Removing link from graph: id {}", id);
 
             let ports = self.link_ports.borrow_mut().remove(&id);
-            if let Some(saved) = ports.and_then(|(from, to)| self.saved_link(from, to)) {
-                self.suspended_links.borrow_mut().insert(saved.clone());
+            if let Some((ports, saved)) =
+                ports.and_then(|(from, to)| Some(((from, to), self.saved_link(from, to)?)))
+            {
+                self.suspended_links
+                    .borrow_mut()
+                    .insert(saved.clone(), ports);
                 let manager = self.obj().downgrade();
                 glib::timeout_add_local_once(super::LINK_FORGET_DELAY, move || {
                     if let Some(manager) = manager.upgrade() {
@@ -680,7 +701,7 @@ mod imp {
         }
 
         fn settle_removed_link(&self, link: SavedLink) {
-            if !self.suspended_links.borrow_mut().remove(&link) {
+            if self.suspended_links.borrow_mut().remove(&link).is_none() {
                 return;
             }
             let (outputs, inputs) = self.resolve_link(&link);
@@ -712,7 +733,7 @@ mod imp {
         fn restore_saved_links(&self) {
             let links = self.saved_virtual_devices.borrow().links().to_vec();
             let suspended = self.suspended_links.borrow().clone();
-            for link in links.iter().filter(|link| !suspended.contains(link)) {
+            for link in links.iter().filter(|link| !suspended.contains_key(link)) {
                 let (outputs, inputs) = self.resolve_link(link);
                 for &port_from in &outputs {
                     for &port_to in &inputs {
@@ -803,7 +824,7 @@ mod imp {
                 .pending_virtual_device_saves
                 .borrow_mut()
                 .remove(&id)
-                .unwrap_or(false);
+                .is_some_and(|(save, _)| save);
             let device = super::VirtualDevice {
                 name: name.clone(),
                 kind,
@@ -841,7 +862,7 @@ mod imp {
                 .set_sensitive(!self.virtual_devices.borrow().is_empty());
         }
 
-        fn show_virtual_device_error(&self, message: &str) {
+        pub(super) fn show_virtual_device_error(&self, message: &str) {
             let dialog = adw::MessageDialog::builder()
                 .transient_for(&self.obj().window())
                 .modal(true)
@@ -1089,17 +1110,53 @@ impl GraphManager {
         save: bool,
     ) {
         let imp = self.imp();
+        if !imp.pw_connected.get() {
+            imp.show_virtual_device_error("Not connected to PipeWire.");
+            return;
+        }
+        let definition = crate::virtual_device_store::Definition {
+            name: name.to_string(),
+            kind,
+            channels,
+        };
+        let node_name = definition.node_name();
+        // A saved device with this exact definition and no live node is a
+        // retry; anything else with the same node name would share its state.
+        let taken = imp
+            .saved_virtual_devices
+            .borrow()
+            .devices()
+            .iter()
+            .any(|saved| saved.node_name() == node_name && *saved != definition)
+            || imp
+                .pending_virtual_device_saves
+                .borrow()
+                .values()
+                .any(|(_, pending)| *pending == node_name)
+            || imp.virtual_devices.borrow().values().any(|device| {
+                crate::virtual_device_store::Definition {
+                    name: device.name.clone(),
+                    kind: device.kind,
+                    channels: device.channels,
+                }
+                .node_name()
+                    == node_name
+            });
+        if save && taken {
+            imp.show_virtual_device_error(&format!(
+                "A virtual {} with a name like \"{name}\" already exists.",
+                match kind {
+                    VirtualDeviceKind::Sink => "sink",
+                    VirtualDeviceKind::Source => "source",
+                }
+            ));
+            return;
+        }
         let id = imp.next_virtual_device_id.get();
         imp.next_virtual_device_id.set(id.wrapping_add(1));
         imp.pending_virtual_device_saves
             .borrow_mut()
-            .insert(id, save);
-        let node_name = crate::virtual_device_store::Definition {
-            name: name.to_string(),
-            kind,
-            channels,
-        }
-        .node_name();
+            .insert(id, (save, node_name.clone()));
         imp.pw_sender
             .get()
             .expect("pw_sender should be set")

@@ -106,7 +106,8 @@ mod imp {
         pub(super) node_filter: RefCell<crate::node_filter::NodeFilter>,
         pub(super) virtual_devices: RefCell<HashMap<u32, super::VirtualDevice>>,
         pub(super) saved_virtual_devices: RefCell<crate::virtual_device_store::Store>,
-        pub(super) pending_virtual_device_saves: RefCell<HashMap<u32, bool>>,
+        /// Whether to save each requested device, and its node name.
+        pub(super) pending_virtual_device_saves: RefCell<HashMap<u32, (bool, String)>>,
         pub next_virtual_device_id: Cell<u32>,
         port_info: RefCell<HashMap<u32, super::PortInfo>>,
         node_is_stream: RefCell<HashMap<u32, bool>>,
@@ -818,7 +819,7 @@ mod imp {
                 .pending_virtual_device_saves
                 .borrow_mut()
                 .remove(&id)
-                .unwrap_or(false);
+                .is_some_and(|(save, _)| save);
             let device = super::VirtualDevice {
                 name: name.clone(),
                 kind,
@@ -1104,13 +1105,25 @@ impl GraphManager {
         save: bool,
     ) {
         let imp = self.imp();
-        let node_name = crate::virtual_device_store::Definition {
+        let definition = crate::virtual_device_store::Definition {
             name: name.to_string(),
             kind,
             channels,
-        }
-        .node_name();
-        let taken = imp.saved_virtual_devices.borrow().contains_node(&node_name)
+        };
+        let node_name = definition.node_name();
+        // A saved device with this exact definition and no live node is a
+        // retry; anything else with the same node name would share its state.
+        let taken = imp
+            .saved_virtual_devices
+            .borrow()
+            .devices()
+            .iter()
+            .any(|saved| saved.node_name() == node_name && *saved != definition)
+            || imp
+                .pending_virtual_device_saves
+                .borrow()
+                .values()
+                .any(|(_, pending)| *pending == node_name)
             || imp.virtual_devices.borrow().values().any(|device| {
                 crate::virtual_device_store::Definition {
                     name: device.name.clone(),
@@ -1134,7 +1147,7 @@ impl GraphManager {
         imp.next_virtual_device_id.set(id.wrapping_add(1));
         imp.pending_virtual_device_saves
             .borrow_mut()
-            .insert(id, save);
+            .insert(id, (save, node_name.clone()));
         imp.pw_sender
             .get()
             .expect("pw_sender should be set")

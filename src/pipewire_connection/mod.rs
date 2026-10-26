@@ -521,14 +521,7 @@ fn handle_node(
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|channels| *channels > 0)
         .unwrap_or(2);
-    let route_device = props
-        .get("device.id")
-        .and_then(|value| value.parse::<u32>().ok())
-        .zip(
-            props
-                .get("card.profile.device")
-                .and_then(|value| value.parse::<i32>().ok()),
-        );
+    let route_device = route_device_from_props(props);
     let layout_key = props
         .get(&keys::NODE_NAME)
         .unwrap_or(name.as_str())
@@ -689,6 +682,18 @@ fn handle_device(
     );
 }
 
+/// The device and route device a hardware node gets its volume from.
+fn route_device_from_props(props: &DictRef) -> Option<(u32, i32)> {
+    props
+        .get("device.id")
+        .and_then(|value| value.parse::<u32>().ok())
+        .zip(
+            props
+                .get("card.profile.device")
+                .and_then(|value| value.parse::<i32>().ok()),
+        )
+}
+
 fn handle_node_info(
     info: &NodeInfoRef,
     sender: &async_channel::Sender<PipewireMessage>,
@@ -697,13 +702,17 @@ fn handle_node_info(
     debug!("Received node info: {:?}", info);
 
     let id = info.id();
-    let proxies = proxies.borrow();
-    let Some(ProxyItem::Node { .. }) = proxies.get(&id) else {
+    let mut proxies = proxies.borrow_mut();
+    let Some(ProxyItem::Node { route_device, .. }) = proxies.get_mut(&id) else {
         error!("Received info on unknown node with id {id}");
         return;
     };
 
     let props = info.props().expect("NodeInfo object is missing properties");
+    // card.profile.device isn't in the registry's global props, only here.
+    if let Some(route) = route_device_from_props(props) {
+        *route_device = Some(route);
+    }
     if let Some(media_name) = props.get(&keys::MEDIA_NAME) {
         let name = get_node_name(props).to_string();
 

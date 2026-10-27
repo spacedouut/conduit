@@ -267,7 +267,7 @@ mod imp {
         /// Returns a [`gsk::Transform`] matrix that can translate from screen space to canvas space.
         ///
         /// This is the inverted form of [`Self::canvas_space_to_screen_space_transform()`], see that function for a more detailed explantion.
-        fn screen_space_to_canvas_space_transform(&self) -> gsk::Transform {
+        pub(super) fn screen_space_to_canvas_space_transform(&self) -> gsk::Transform {
             self.canvas_space_to_screen_space_transform()
                 .invert()
                 .unwrap()
@@ -287,7 +287,9 @@ mod imp {
                 let target = widget
                     .pick(x, y, gtk::PickFlags::DEFAULT)
                     .expect("drag-begin pick() did not return a widget");
-                *dragged_node = if target.ancestor(Port::static_type()).is_some() {
+                *dragged_node = if target.ancestor(Port::static_type()).is_some()
+                    || target.ancestor(gtk::TextView::static_type()).is_some()
+                {
                     // The user targeted a port, so the dragging should be handled by the Port
                     // component instead of here.
                     None
@@ -870,11 +872,15 @@ impl GraphView {
         self.queue_draw();
     }
 
+    /// Remove all PipeWire nodes and links. Comments aren't part of PipeWire and stay.
     pub fn clear(&mut self) {
         self.imp().links.borrow_mut().clear();
-        for (node, _) in self.imp().nodes.borrow_mut().drain() {
-            node.unparent();
-        }
+        self.imp().nodes.borrow_mut().retain(|node, _| {
+            if !node.is_comment() {
+                node.unparent();
+            }
+            node.is_comment()
+        });
         self.queue_draw();
     }
 
@@ -883,6 +889,16 @@ impl GraphView {
     /// The returned position is in canvas-space (non-zoomed, (0, 0) fixed in the middle of the canvas).
     pub(super) fn node_position(&self, node: &Node) -> Option<Point> {
         self.imp().nodes.borrow().get(node).copied()
+    }
+
+    /// The canvas-space point at the middle of what's on screen.
+    pub fn visible_center(&self) -> Point {
+        self.imp()
+            .screen_space_to_canvas_space_transform()
+            .transform_point(&Point::new(
+                self.width() as f32 / 2.0,
+                self.height() as f32 / 2.0,
+            ))
     }
 
     pub fn set_node_position(&self, widget: &Node, point: &Point) {

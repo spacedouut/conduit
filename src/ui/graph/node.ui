@@ -42,6 +42,21 @@
           </object>
         </child>
         <child>
+          <object class="GtkTextView" id="comment_view">
+            <style>
+              <class name="comment-text"></class>
+            </style>
+            <property name="visible">false</property>
+            <property name="wrap-mode">word-char</property>
+            <property name="width-request">220</property>
+            <property name="height-request">60</property>
+            <property name="top-margin">2</property>
+            <property name="bottom-margin">8</property>
+            <property name="left-margin">8</property>
+            <property name="right-margin">8</property>
+          </object>
+        </child>
+        <child>
           <object class="GtkScale" id="volume_scale">
             <property name="orientation">horizontal</property>
             <property name="adjustment"><object class="GtkAdjustment"><property name="lower">0</property><property name="upper">1.5</property><property name="value">1</property><property name="step-increment">0.05</property></object></property>

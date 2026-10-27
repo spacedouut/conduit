@@ -77,14 +77,14 @@ impl NodeLayout {
     }
 }
 
-fn encode_key(key: &str) -> String {
+pub(crate) fn encode_key(key: &str) -> String {
     key.as_bytes()
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
 }
 
-fn decode_key(encoded: &str) -> Option<String> {
+pub(crate) fn decode_key(encoded: &str) -> Option<String> {
     if encoded.len() % 2 != 0 {
         return None;
     }

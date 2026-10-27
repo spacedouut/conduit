@@ -62,6 +62,9 @@ mod imp {
         pub(super) port_grid: TemplateChild<gtk::Grid>,
         #[template_child]
         pub(super) volume_scale: TemplateChild<gtk::Scale>,
+        #[template_child]
+        pub(super) comment_view: TemplateChild<gtk::TextView>,
+        pub(super) is_comment: Cell<bool>,
         pub(super) show_volume_sliders: Cell<bool>,
         pub(super) has_volume: Cell<bool>,
         pub(super) syncing_volume: Cell<bool>,
@@ -108,6 +111,20 @@ mod imp {
                 let node = click.widget().downcast::<super::Node>().unwrap();
                 let popover = gtk::Popover::new();
                 let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                if node.is_comment() {
+                    let delete = gtk::Button::with_label("Delete comment");
+                    delete.connect_clicked(glib::clone!(@weak node, @weak popover => move |_| {
+                        popover.popdown();
+                        node.emit_by_name::<()>("delete-comment", &[]);
+                    }));
+                    content.append(&delete);
+                    popover.set_child(Some(&content));
+                    popover.set_parent(&node);
+                    popover
+                        .set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+                    popover.popup();
+                    return;
+                }
                 let show_sliders = gtk::CheckButton::with_label("Show volume sliders");
                 show_sliders.set_active(node.imp().show_volume_sliders.get());
                 show_sliders.connect_toggled(glib::clone!(@weak node => move |button| {
@@ -132,6 +149,7 @@ mod imp {
             static SIGNALS: Lazy<Vec<Signal>> = Lazy::new(|| {
                 vec![
                     Signal::builder("disconnect-all").build(),
+                    Signal::builder("delete-comment").build(),
                     Signal::builder("show-volume-sliders-changed")
                         .param_types([bool::static_type()])
                         .build(),
@@ -236,6 +254,31 @@ impl Node {
             .property("node-name", name)
             .property("pipewire-id", pipewire_id)
             .build()
+    }
+
+    /// A free-floating text note instead of a PipeWire node.
+    pub fn new_comment(text: &str) -> Self {
+        let node = Self::new("Comment", u32::MAX);
+        let imp = node.imp();
+        imp.is_comment.set(true);
+        node.add_css_class("comment");
+        imp.node_name.add_css_class("dim-label");
+        imp.comment_view.buffer().set_text(text);
+        imp.comment_view.set_visible(true);
+        imp.volume_scale.set_visible(false);
+        node
+    }
+
+    pub fn is_comment(&self) -> bool {
+        self.imp().is_comment.get()
+    }
+
+    pub fn focus_comment(&self) {
+        self.imp().comment_view.grab_focus();
+    }
+
+    pub fn comment_buffer(&self) -> gtk::TextBuffer {
+        self.imp().comment_view.buffer()
     }
 
     pub fn add_port(&self, port: Port) {

@@ -26,9 +26,7 @@ use adw::{
     subclass::prelude::*,
 };
 
-use std::cmp::Ordering;
-
-use super::{Link, Node, Port};
+use super::{placement, Link, Node, Port};
 use crate::NodeType;
 
 const CANVAS_SIZE: f64 = 5000.0;
@@ -87,6 +85,9 @@ mod imp {
 
         /// This keeps track of an ongoing node drag operation.
         pub dragged_node: RefCell<Option<DragState>>,
+        /// Nodes the user hasn't placed, with their column, in the order
+        /// they were added. They are stacked automatically as they grow.
+        pub auto_placed: RefCell<Vec<(Node, usize)>>,
 
         // These keep track of an ongoing port drag operation
         pub dragged_port: glib::WeakRef<Port>,
@@ -111,6 +112,7 @@ mod imp {
                 vadjustment: Default::default(),
                 zoom_factor: Default::default(),
                 dragged_node: Default::default(),
+                auto_placed: Default::default(),
                 dragged_port: Default::default(),
                 port_drag_cursor: Cell::new(Point::new(0.0, 0.0)),
                 zoom_gesture_initial_zoom: Default::default(),
@@ -210,6 +212,8 @@ mod imp {
         fn size_allocate(&self, _width: i32, _height: i32, baseline: i32) {
             let widget = &*self.obj();
 
+            self.place_auto_nodes();
+
             for (node, point) in self.nodes.borrow().iter() {
                 let (_, natural_size) = node.preferred_size();
 
@@ -283,6 +287,49 @@ mod imp {
             self.canvas_space_to_screen_space_transform()
                 .invert()
                 .unwrap_or_else(|_| gsk::Transform::new())
+        }
+
+        /// Stack the nodes the user hasn't placed so they don't overlap.
+        fn place_auto_nodes(&self) {
+            let auto_placed = self.auto_placed.borrow();
+            if auto_placed.is_empty() {
+                return;
+            }
+            let auto: HashSet<&Node> = auto_placed.iter().map(|(node, _)| node).collect();
+            let size = |node: &Node| {
+                let (_, natural) = node.preferred_size();
+                (natural.width() as f32, natural.height() as f32)
+            };
+
+            let mut nodes = self.nodes.borrow_mut();
+            let taken: Vec<_> = nodes
+                .iter()
+                .filter(|(node, _)| node.is_visible() && !auto.contains(node))
+                .map(|(node, point)| {
+                    let (width, height) = size(node);
+                    placement::Rect {
+                        x: point.x(),
+                        y: point.y(),
+                        width,
+                        height,
+                    }
+                })
+                .collect();
+            let visible: Vec<_> = auto_placed
+                .iter()
+                .filter(|(node, _)| node.is_visible())
+                .collect();
+            let sizes: Vec<_> = visible
+                .iter()
+                .map(|(node, column)| {
+                    let (width, height) = size(node);
+                    (*column, width, height)
+                })
+                .collect();
+            let positions = placement::stack(&taken, &sizes, 3);
+            for ((node, _), (x, y)) in visible.into_iter().zip(positions) {
+                nodes.insert(node.clone(), Point::new(x, y));
+            }
         }
 
         fn setup_node_dragging(&self) {
@@ -811,36 +858,21 @@ impl GraphView {
         self.set_property("zoom-factor", zoom_factor);
     }
 
+    /// Add a node. Until it is moved or given a position, it is stacked in
+    /// a column for its type: outputs on the left, inputs on the right.
     pub fn add_node(&self, node: Node, node_type: Option<NodeType>) {
         let imp = self.imp();
         node.set_parent(self);
-
-        // Place widgets in colums of 3, growing down
-        let x = if let Some(node_type) = node_type {
-            match node_type {
-                NodeType::Output => 20.0,
-                NodeType::Input => 820.0,
-            }
-        } else {
-            420.0
+        let column = match node_type {
+            Some(NodeType::Output) => 0,
+            None => 1,
+            Some(NodeType::Input) => 2,
         };
-
-        let y = imp
-            .nodes
-            .borrow()
-            .values()
-            .map(|point| (point.x(), point.y()))
-            .filter(|(x2, _)| {
-                // Only look for other nodes that have a similar x coordinate
-                (x - x2).abs() < 50.0
-            })
-            .max_by(|y1, y2| {
-                // Get max in column
-                y1.partial_cmp(y2).unwrap_or(Ordering::Equal)
-            })
-            .map_or(20_f32, |(_x, y)| y + 120.0);
-
-        imp.nodes.borrow_mut().insert(node, Point::new(x, y));
+        imp.auto_placed.borrow_mut().push((node.clone(), column));
+        imp.nodes
+            .borrow_mut()
+            .insert(node, Point::new(placement::ORIGIN.0, placement::ORIGIN.1));
+        self.queue_allocate();
     }
 
     pub fn set_node_position_changed_handler(&self, callback: impl Fn(&Node, Point) + 'static) {
@@ -850,7 +882,11 @@ impl GraphView {
     }
 
     pub fn remove_node(&self, node: &Node) {
-        let mut nodes = self.imp().nodes.borrow_mut();
+        let imp = self.imp();
+        imp.auto_placed
+            .borrow_mut()
+            .retain(|(placed, _)| placed != node);
+        let mut nodes = imp.nodes.borrow_mut();
 
         if nodes.remove(node).is_some() {
             node.unparent();
@@ -892,6 +928,10 @@ impl GraphView {
             }
             node.is_comment()
         });
+        self.imp()
+            .auto_placed
+            .borrow_mut()
+            .retain(|(node, _)| node.is_comment());
         self.queue_draw();
     }
 
@@ -912,7 +952,12 @@ impl GraphView {
             ))
     }
 
+    /// Move a node. It is no longer placed automatically.
     pub fn set_node_position(&self, widget: &Node, point: &Point) {
+        self.imp()
+            .auto_placed
+            .borrow_mut()
+            .retain(|(node, _)| node != widget);
         let mut nodes = self.imp().nodes.borrow_mut();
         let Some(node_point) = nodes.get_mut(widget) else {
             log::warn!("Tried to move a node that is not on the graph");

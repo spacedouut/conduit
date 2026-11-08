@@ -1027,6 +1027,12 @@ impl GraphView {
         self.queue_allocate();
     }
 
+    /// Stop drawing the link that follows the pointer during a port drag.
+    pub fn end_port_drag(&self) {
+        self.imp().dragged_port.set(None);
+        self.queue_draw();
+    }
+
     pub fn set_node_position_changed_handler(&self, callback: impl Fn(&Node, Point) + 'static) {
         self.imp()
             .node_position_changed

@@ -222,6 +222,17 @@ mod imp {
 
                 log::trace!("Drag started from port {}", port.pipewire_id());
             });
+            // The graph only hears the pointer leave when the drag isn't dropped,
+            // so stop drawing the dragged link once the drag is over either way.
+            drag_src.connect_drag_end(|drag_source, _, _| {
+                if let Some(graph) = drag_source
+                    .widget()
+                    .ancestor(crate::ui::graph::GraphView::static_type())
+                    .and_downcast::<crate::ui::graph::GraphView>()
+                {
+                    graph.end_port_drag();
+                }
+            });
             drag_src.connect_drag_cancel(|drag_source, _, _| {
                 let Ok(port) = drag_source.widget().dynamic_cast::<super::Port>() else {
                     return false;

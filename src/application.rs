@@ -69,8 +69,9 @@ mod imp {
             let zoom_set_action =
                 gio::SimpleAction::new("set-zoom", Some(&f64::static_variant_type()));
             zoom_set_action.connect_activate(clone!(@weak graphview => move|_, param| {
-                let zoom_factor = param.unwrap().get::<f64>().unwrap();
-                graphview.set_zoom_factor(zoom_factor, None)
+                if let Some(zoom_factor) = param.and_then(|param| param.get::<f64>()) {
+                    graphview.set_zoom_factor(zoom_factor, None)
+                }
             }));
             self.window.add_action(&zoom_set_action);
 
@@ -90,11 +91,14 @@ mod imp {
             // Load CSS from the STYLE variable.
             let provider = gtk::CssProvider::new();
             provider.load_from_data(STYLE);
-            gtk::style_context_add_provider_for_display(
-                &gtk::gdk::Display::default().expect("Error initializing gtk css provider."),
-                &provider,
-                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-            );
+            match gtk::gdk::Display::default() {
+                Some(display) => gtk::style_context_add_provider_for_display(
+                    &display,
+                    &provider,
+                    gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+                ),
+                None => error!("No display to load the stylesheet on"),
+            }
 
             self.setup_actions();
         }
@@ -148,7 +152,9 @@ mod imp {
 
         fn show_about_dialog(&self) {
             let obj = &*self.obj();
-            let window = obj.active_window().unwrap();
+            let window = obj
+                .active_window()
+                .unwrap_or_else(|| self.window.clone().upcast());
             let authors: Vec<&str> = AUTHORS.split(':').collect();
 
             let about_window = adw::AboutWindow::builder()
@@ -193,7 +199,9 @@ mod imp {
                 match opts.lookup::<String>("socket") {
                     Ok(p) => {
                         current_remote_label.set_label(p.as_deref().unwrap_or(DEFAULT_REMOTE_NAME));
-                        pw_sender.send(GtkMessage::Connect(p)).unwrap();
+                        if pw_sender.send(GtkMessage::Connect(p)).is_err() {
+                            error!("PipeWire thread is gone; cannot connect");
+                        }
                     },
                     Err(e) => error!("Invalid socket path: {e}"),
                 }
@@ -224,15 +232,16 @@ impl Application {
 
         imp.setup_options(pw_sender.clone());
 
-        imp.graph_manager
-            .set(GraphManager::new(
-                &imp.window,
-                &imp.window.graph(),
-                &imp.window.connection_banner(),
-                pw_sender,
-                gtk_receiver,
-            ))
-            .expect("Should be able to set graph manager");
+        let graph_manager = GraphManager::new(
+            &imp.window,
+            &imp.window.graph(),
+            &imp.window.connection_banner(),
+            pw_sender,
+            gtk_receiver,
+        );
+        if imp.graph_manager.set(graph_manager).is_err() {
+            error!("Application already had a graph manager");
+        }
 
         let (tray_sender, tray_receiver) = async_channel::unbounded();
         crate::tray::spawn(tray_sender);

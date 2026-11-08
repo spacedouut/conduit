@@ -63,6 +63,8 @@ mod imp {
         }
     }
 
+    pub type NodePositionChanged = Box<dyn Fn(&Node, Point)>;
+
     pub struct DragState {
         node: glib::WeakRef<Node>,
         /// This stores the offset of the pointer to the origin of the node,
@@ -97,7 +99,7 @@ mod imp {
         // This keeps track of an ongoing move view gesture.
         pub move_view_state: Cell<(f64, f64)>,
 
-        pub node_position_changed: RefCell<Option<Box<dyn Fn(&Node, Point)>>>,
+        pub node_position_changed: RefCell<Option<NodePositionChanged>>,
     }
 
     impl Default for GraphView {
@@ -194,8 +196,10 @@ mod imp {
                 }
                 "hscroll-policy" | "vscroll-policy" => {}
                 "zoom-factor" => {
-                    self.zoom_factor.set(value.get().unwrap());
-                    obj.queue_allocate();
+                    if let Ok(zoom_factor) = value.get() {
+                        self.zoom_factor.set(zoom_factor);
+                        obj.queue_allocate();
+                    }
                 }
                 _ => unimplemented!(),
             }
@@ -255,8 +259,16 @@ mod imp {
         ///
         /// This is the inverted form of [`Self::screen_space_to_canvas_space_transform()`].
         fn canvas_space_to_screen_space_transform(&self) -> gsk::Transform {
-            let hadj = self.hadjustment.borrow().as_ref().unwrap().value();
-            let vadj = self.vadjustment.borrow().as_ref().unwrap().value();
+            let hadj = self
+                .hadjustment
+                .borrow()
+                .as_ref()
+                .map_or(0.0, |adj| adj.value());
+            let vadj = self
+                .vadjustment
+                .borrow()
+                .as_ref()
+                .map_or(0.0, |adj| adj.value());
             let zoom_factor = self.zoom_factor.get();
 
             gsk::Transform::new()
@@ -270,23 +282,22 @@ mod imp {
         pub(super) fn screen_space_to_canvas_space_transform(&self) -> gsk::Transform {
             self.canvas_space_to_screen_space_transform()
                 .invert()
-                .unwrap()
+                .unwrap_or_else(|_| gsk::Transform::new())
         }
 
         fn setup_node_dragging(&self) {
             let drag_controller = gtk::GestureDrag::new();
 
             drag_controller.connect_drag_begin(|drag_controller, x, y| {
-                let widget = drag_controller
-                    .widget()
-                    .dynamic_cast::<super::GraphView>()
-                    .expect("drag-begin event is not on the GraphView");
+                let Ok(widget) = drag_controller.widget().dynamic_cast::<super::GraphView>() else {
+                    return;
+                };
                 let mut dragged_node = widget.imp().dragged_node.borrow_mut();
 
                 // pick() should at least return the widget itself.
-                let target = widget
-                    .pick(x, y, gtk::PickFlags::DEFAULT)
-                    .expect("drag-begin pick() did not return a widget");
+                let Some(target) = widget.pick(x, y, gtk::PickFlags::DEFAULT) else {
+                    return;
+                };
                 *dragged_node = if target.ancestor(Port::static_type()).is_some()
                     || target.ancestor(gtk::TextView::static_type()).is_some()
                 {
@@ -296,7 +307,9 @@ mod imp {
                 } else if let Some(target) = target.ancestor(Node::static_type()) {
                     // The user targeted a Node without targeting a specific Port.
                     // Drag the Node around the screen.
-                    let node = target.dynamic_cast_ref::<Node>().unwrap();
+                    let Some(node) = target.dynamic_cast_ref::<Node>() else {
+                        return;
+                    };
 
                     let Some(canvas_node_pos) = widget.node_position(node) else {
                         return;
@@ -318,19 +331,18 @@ mod imp {
                 }
             });
             drag_controller.connect_drag_update(|drag_controller, x, y| {
-                let widget = drag_controller
-                    .widget()
-                    .dynamic_cast::<super::GraphView>()
-                    .expect("drag-update event is not on the GraphView");
+                let Ok(widget) = drag_controller.widget().dynamic_cast::<super::GraphView>() else {
+                    return;
+                };
                 let dragged_node = widget.imp().dragged_node.borrow();
                 let Some(DragState { node, offset }) = dragged_node.as_ref() else {
                     return;
                 };
                 let Some(node) = node.upgrade() else { return };
 
-                let (start_x, start_y) = drag_controller
-                    .start_point()
-                    .expect("Drag has no start point");
+                let Some((start_x, start_y)) = drag_controller.start_point() else {
+                    return;
+                };
 
                 let onscreen_node_origin = Point::new((start_x + x) as f32, (start_y + y) as f32);
                 let transform = widget.imp().screen_space_to_canvas_space_transform();
@@ -345,10 +357,9 @@ mod imp {
                 );
             });
             drag_controller.connect_drag_end(|drag_controller, _, _| {
-                let widget = drag_controller
-                    .widget()
-                    .dynamic_cast::<super::GraphView>()
-                    .expect("drag-end event is not on the GraphView");
+                let Ok(widget) = drag_controller.widget().dynamic_cast::<super::GraphView>() else {
+                    return;
+                };
                 let Some(drag_state) = widget.imp().dragged_node.borrow_mut().take() else {
                     return;
                 };
@@ -369,28 +380,25 @@ mod imp {
             let controller = gtk::DropControllerMotion::new();
 
             controller.connect_enter(|controller, x, y| {
-                let graph = controller
-                    .widget()
-                    .downcast::<super::GraphView>()
-                    .expect("Widget should be a graphview");
+                let Ok(graph) = controller.widget().downcast::<super::GraphView>() else {
+                    return;
+                };
 
                 graph.imp().port_drag_enter(controller, x, y)
             });
 
             controller.connect_motion(|controller, x, y| {
-                let graph = controller
-                    .widget()
-                    .downcast::<super::GraphView>()
-                    .expect("Widget should be a graphview");
+                let Ok(graph) = controller.widget().downcast::<super::GraphView>() else {
+                    return;
+                };
 
                 graph.imp().port_drag_motion(x, y)
             });
 
             controller.connect_leave(|controller| {
-                let graph = controller
-                    .widget()
-                    .downcast::<super::GraphView>()
-                    .expect("Widget should be a graphview");
+                let Ok(graph) = controller.widget().downcast::<super::GraphView>() else {
+                    return;
+                };
 
                 graph.imp().port_drag_leave()
             });
@@ -413,7 +421,9 @@ mod imp {
                     let Ok(value) = value else {
                         return;
                     };
-                    let port: &Port = value.get().expect("Value should contain a port");
+                    let Ok(port) = value.get::<&Port>() else {
+                        return;
+                    };
 
                     imp.dragged_port.set(Some(port));
                 }),
@@ -445,16 +455,17 @@ mod imp {
                 gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
 
             scroll_controller.connect_scroll(|eventcontroller, _, delta_y| {
-                let event = eventcontroller.current_event().unwrap(); // We are inside the event handler, so it must have an event
+                let Some(event) = eventcontroller.current_event() else {
+                    return glib::Propagation::Proceed;
+                };
 
                 if event
                     .modifier_state()
                     .contains(gdk::ModifierType::CONTROL_MASK)
                 {
-                    let widget = eventcontroller
-                        .widget()
-                        .downcast::<super::GraphView>()
-                        .unwrap();
+                    let Ok(widget) = eventcontroller.widget().downcast::<super::GraphView>() else {
+                        return glib::Propagation::Proceed;
+                    };
                     widget.set_zoom_factor(widget.zoom_factor() + (0.1 * -delta_y), None);
 
                     glib::Propagation::Stop
@@ -468,7 +479,9 @@ mod imp {
         fn setup_zoom_gesture(&self) {
             let zoom_gesture = gtk::GestureZoom::new();
             zoom_gesture.connect_begin(|gesture, _| {
-                let widget = gesture.widget().downcast::<super::GraphView>().unwrap();
+                let Ok(widget) = gesture.widget().downcast::<super::GraphView>() else {
+                    return;
+                };
 
                 widget
                     .imp()
@@ -480,13 +493,13 @@ mod imp {
                     .set(gesture.bounding_box_center());
             });
             zoom_gesture.connect_scale_changed(move |gesture, delta| {
-                let widget = gesture.widget().downcast::<super::GraphView>().unwrap();
+                let Ok(widget) = gesture.widget().downcast::<super::GraphView>() else {
+                    return;
+                };
 
-                let initial_zoom = widget
-                    .imp()
-                    .zoom_gesture_initial_zoom
-                    .get()
-                    .expect("Initial zoom not set during zoom gesture");
+                let Some(initial_zoom) = widget.imp().zoom_gesture_initial_zoom.get() else {
+                    return;
+                };
 
                 widget.set_zoom_factor(initial_zoom * delta, gesture.bounding_box_center());
             });
@@ -501,19 +514,17 @@ mod imp {
             // TODO: set `all-scroll` cursor while dragging view
 
             drag_controller.connect_drag_begin(|drag_controller, _, _| {
-                let widget = drag_controller
-                    .widget()
-                    .downcast::<super::GraphView>()
-                    .unwrap();
+                let Ok(widget) = drag_controller.widget().downcast::<super::GraphView>() else {
+                    return;
+                };
 
                 widget.imp().move_view_state.set((0.0, 0.0));
             });
 
             drag_controller.connect_drag_update(|drag_controller, x, y| {
-                let widget = drag_controller
-                    .widget()
-                    .downcast::<super::GraphView>()
-                    .unwrap();
+                let Ok(widget) = drag_controller.widget().downcast::<super::GraphView>() else {
+                    return;
+                };
 
                 let imp = widget.imp();
                 let state = imp.move_view_state.replace((x, y));
@@ -522,8 +533,11 @@ mod imp {
 
                 let hadjustment_ref = imp.hadjustment.borrow();
                 let vadjustment_ref = imp.vadjustment.borrow();
-                let hadjustment = hadjustment_ref.as_ref().unwrap();
-                let vadjustment = vadjustment_ref.as_ref().unwrap();
+                let (Some(hadjustment), Some(vadjustment)) =
+                    (hadjustment_ref.as_ref(), vadjustment_ref.as_ref())
+                else {
+                    return;
+                };
 
                 let new_hadjustment = hadjustment.value() + delta_x;
                 let new_vadjustment = vadjustment.value() + delta_y;
@@ -635,23 +649,20 @@ mod imp {
 
             link_cr.set_line_width(2.0 * self.zoom_factor.get());
 
+            let lookup_color = |name: &str| {
+                widget
+                    .style_context()
+                    .lookup_color(name)
+                    .unwrap_or_else(|| {
+                        warn!("Color {name} not found in the stylesheet");
+                        gdk::RGBA::new(0.5, 0.5, 0.5, 1.0)
+                    })
+            };
             let colors = Colors {
-                audio: widget
-                    .style_context()
-                    .lookup_color("media-type-audio")
-                    .expect("color not found"),
-                video: widget
-                    .style_context()
-                    .lookup_color("media-type-video")
-                    .expect("color not found"),
-                midi: widget
-                    .style_context()
-                    .lookup_color("media-type-midi")
-                    .expect("color not found"),
-                unknown: widget
-                    .style_context()
-                    .lookup_color("media-type-unknown")
-                    .expect("color not found"),
+                audio: lookup_color("media-type-audio"),
+                video: lookup_color("media-type-video"),
+                midi: lookup_color("media-type-midi"),
+                unknown: lookup_color("media-type-unknown"),
             };
 
             for link in self.links.borrow().iter().filter(|link| link.visible()) {
@@ -781,8 +792,12 @@ impl GraphView {
         let old_zoom = self.imp().zoom_factor.get();
         let hadjustment_ref = self.imp().hadjustment.borrow();
         let vadjustment_ref = self.imp().vadjustment.borrow();
-        let hadjustment = hadjustment_ref.as_ref().unwrap();
-        let vadjustment = vadjustment_ref.as_ref().unwrap();
+        let (Some(hadjustment), Some(vadjustment)) =
+            (hadjustment_ref.as_ref(), vadjustment_ref.as_ref())
+        else {
+            self.set_property("zoom-factor", zoom_factor);
+            return;
+        };
 
         let x_total = (anchor_x_screen + hadjustment.value()) / old_zoom;
         let y_total = (anchor_y_screen + vadjustment.value()) / old_zoom;
@@ -813,12 +828,8 @@ impl GraphView {
         let y = imp
             .nodes
             .borrow()
-            .iter()
-            .map(|node| {
-                // Map nodes to their locations
-                let point = self.node_position(&node.0.clone().upcast()).unwrap();
-                (point.x(), point.y())
-            })
+            .values()
+            .map(|point| (point.x(), point.y()))
             .filter(|(x2, _)| {
                 // Only look for other nodes that have a similar x coordinate
                 (x - x2).abs() < 50.0
@@ -903,7 +914,10 @@ impl GraphView {
 
     pub fn set_node_position(&self, widget: &Node, point: &Point) {
         let mut nodes = self.imp().nodes.borrow_mut();
-        let node_point = nodes.get_mut(widget).expect("Node is not on the graph");
+        let Some(node_point) = nodes.get_mut(widget) else {
+            log::warn!("Tried to move a node that is not on the graph");
+            return;
+        };
 
         // Clamp the new position to within the graph, so a node can't be moved outside it and be lost.
         node_point.set_x(point.x().clamp(

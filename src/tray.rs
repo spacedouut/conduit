@@ -68,7 +68,8 @@ impl ksni::Tray for ConduitTray {
 }
 
 pub fn spawn(action_sender: Sender<Action>) {
-    std::thread::Builder::new()
+    let fallback_sender = action_sender.clone();
+    let spawned = std::thread::Builder::new()
         .name("conduit-tray".into())
         .spawn(move || {
             let tray = ConduitTray {
@@ -90,6 +91,9 @@ pub fn spawn(action_sender: Sender<Action>) {
                     let _ = action_sender.try_send(Action::WindowUnreachable);
                 }
             }
-        })
-        .expect("Could not start system tray thread");
+        });
+    if let Err(error) = spawned {
+        log::warn!("Could not start system tray thread: {error}");
+        let _ = fallback_sender.try_send(Action::WindowUnreachable);
+    }
 }

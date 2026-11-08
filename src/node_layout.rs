@@ -61,7 +61,7 @@ impl NodeLayout {
         }
 
         let mut positions: Vec<_> = self.positions.iter().collect();
-        positions.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        positions.sort_unstable_by_key(|(key, _)| *key);
         let contents = positions
             .into_iter()
             .map(|(key, (x, y))| format!("{}\t{x}\t{y}\n", encode_key(key)))

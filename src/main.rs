@@ -178,7 +178,9 @@ static GLIB_LOGGER: glib::GlibLogger = glib::GlibLogger::new(
 );
 
 fn init_glib_logger() {
-    log::set_logger(&GLIB_LOGGER).expect("Failed to set logger");
+    if let Err(error) = log::set_logger(&GLIB_LOGGER) {
+        eprintln!("Could not set up logging: {error}");
+    }
 
     // Glib does not have a "Trace" log level, so only print messages "Debug" or higher priority.
     log::set_max_level(log::LevelFilter::Debug);
@@ -190,7 +192,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Aquire main context so that we can attach the gtk channel later.
     let ctx = glib::MainContext::default();
-    let _guard = ctx.acquire().unwrap();
+    let _guard = ctx.acquire()?;
 
     // Start the pipewire thread with channels in both directions.
 
@@ -203,11 +205,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     app.run();
 
-    pw_sender
-        .send(GtkMessage::Terminate)
-        .expect("Failed to send message");
+    if pw_sender.send(GtkMessage::Terminate).is_err() {
+        log::warn!("PipeWire thread already stopped");
+    }
 
-    pw_thread.join().expect("Pipewire thread panicked");
+    if pw_thread.join().is_err() {
+        log::error!("PipeWire thread panicked");
+    }
 
     Ok(())
 }

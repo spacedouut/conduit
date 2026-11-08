@@ -54,6 +54,8 @@ mod imp {
     };
     use crate::{ui::graph, MediaType, NodeType};
 
+    const VOLUME_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
     #[derive(Default, glib::Properties)]
     #[properties(wrapper_type = super::GraphManager)]
     pub struct GraphManager {
@@ -83,6 +85,13 @@ mod imp {
             RefCell<crate::volume_slider_setting::VolumeSliderSetting>,
         pub(super) node_filter: RefCell<crate::node_filter::NodeFilter>,
         link_restore_queued: Cell<bool>,
+        volume_save_queued: Cell<bool>,
+    }
+
+    impl Drop for GraphManager {
+        fn drop(&mut self) {
+            self.volumes.borrow_mut().save();
+        }
     }
 
     #[glib::object_subclass]
@@ -236,9 +245,11 @@ mod imp {
                         scale.set_value(1.0);
                         return;
                     }
+                    let volume = volume_manager::linear_from_slider(scale.value());
+                    manager.user_set_volume(node.pipewire_id(), volume);
                     manager.send(GtkMessage::SetNodeVolume {
                         node_id: node.pipewire_id(),
-                        volume: volume_manager::linear_from_slider(scale.value()),
+                        volume,
                     });
                 }),
             );
@@ -312,6 +323,35 @@ mod imp {
             node.set_remote_volume(volume_manager::slider_from_linear(
                 restore.unwrap_or(volume),
             ));
+            self.queue_volume_save();
+        }
+
+        fn user_set_volume(&self, id: u32, volume: f32) {
+            let Some(key) = self.topology.borrow().node_key(id).map(str::to_owned) else {
+                return;
+            };
+            self.volumes.borrow_mut().user_set_volume(
+                id,
+                &key,
+                volume,
+                &mut self.devices.borrow_mut().store,
+            );
+            self.queue_volume_save();
+        }
+
+        /// Write remembered volumes shortly, so dragging a slider doesn't
+        /// rewrite the file for every step.
+        fn queue_volume_save(&self) {
+            if !self.volumes.borrow().needs_save() || self.volume_save_queued.replace(true) {
+                return;
+            }
+            let manager = self.obj().downgrade();
+            glib::timeout_add_local_once(VOLUME_SAVE_DELAY, move || {
+                if let Some(manager) = manager.upgrade() {
+                    manager.imp().volume_save_queued.set(false);
+                    manager.imp().volumes.borrow_mut().save();
+                }
+            });
         }
 
         /// Remove the node with the specified id from the view.

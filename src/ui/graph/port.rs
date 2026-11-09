@@ -216,18 +216,27 @@ mod imp {
             // The graph will render a link from the source port to the cursor to visualize the drag instead.
             drag_src.set_icon(Some(&gdk::Paintable::new_empty(0, 0)), 0, 0);
             drag_src.connect_drag_begin(|drag_source, _| {
-                let port = drag_source
-                    .widget()
-                    .dynamic_cast::<super::Port>()
-                    .expect("Widget should be a Port");
+                let Ok(port) = drag_source.widget().dynamic_cast::<super::Port>() else {
+                    return;
+                };
 
                 log::trace!("Drag started from port {}", port.pipewire_id());
             });
-            drag_src.connect_drag_cancel(|drag_source, _, _| {
-                let port = drag_source
+            // The graph only hears the pointer leave when the drag isn't dropped,
+            // so stop drawing the dragged link once the drag is over either way.
+            drag_src.connect_drag_end(|drag_source, _, _| {
+                if let Some(graph) = drag_source
                     .widget()
-                    .dynamic_cast::<super::Port>()
-                    .expect("Widget should be a Port");
+                    .ancestor(crate::ui::graph::GraphView::static_type())
+                    .and_downcast::<crate::ui::graph::GraphView>()
+                {
+                    graph.end_port_drag();
+                }
+            });
+            drag_src.connect_drag_cancel(|drag_source, _, _| {
+                let Ok(port) = drag_source.widget().dynamic_cast::<super::Port>() else {
+                    return false;
+                };
 
                 log::trace!("Drag from port {} was cancelled", port.pipewire_id());
 
@@ -239,16 +248,18 @@ mod imp {
                 gtk::DropTarget::new(super::Port::static_type(), gdk::DragAction::COPY);
             drop_target.set_preload(true);
             drop_target.connect_value_notify(|drop_target| {
-                let port = drop_target
-                    .widget()
-                    .dynamic_cast::<super::Port>()
-                    .expect("Widget should be a Port");
+                let Ok(port) = drop_target.widget().dynamic_cast::<super::Port>() else {
+                    return;
+                };
 
                 let Some(value) = drop_target.value() else {
                     return;
                 };
 
-                let other_port: super::Port = value.get().expect("Drop value should be a port");
+                let Ok(other_port) = value.get::<super::Port>() else {
+                    drop_target.reject();
+                    return;
+                };
 
                 // Disallow drags between two ports that have the same direction
                 if !port.is_linkable_to(&other_port) {
@@ -258,13 +269,13 @@ mod imp {
                 }
             });
             drop_target.connect_drop(|drop_target, val, _, _| {
-                let port = drop_target
-                    .widget()
-                    .dynamic_cast::<super::Port>()
-                    .expect("Widget should be a Port");
-                let other_port = val
-                    .get::<super::Port>()
-                    .expect("Dropped value should be a Port");
+                let Ok(port) = drop_target.widget().dynamic_cast::<super::Port>() else {
+                    return false;
+                };
+                let Ok(other_port) = val.get::<super::Port>() else {
+                    log::warn!("Dropped something that is not a port");
+                    return false;
+                };
 
                 // Do not accept a drop between imcompatible ports
                 if !port.is_linkable_to(&other_port) {

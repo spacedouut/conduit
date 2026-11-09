@@ -108,7 +108,9 @@ mod imp {
             let click = gtk::GestureClick::new();
             click.set_button(gtk::gdk::BUTTON_SECONDARY);
             click.connect_pressed(|click, _, x, y| {
-                let node = click.widget().downcast::<super::Node>().unwrap();
+                let Ok(node) = click.widget().downcast::<super::Node>() else {
+                    return;
+                };
                 let popover = gtk::Popover::new();
                 let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
                 if node.is_comment() {
@@ -202,11 +204,11 @@ mod imp {
                 .set_visible(!ports_out.is_empty() || !ports_in.is_empty());
 
             for (i, port) in ports_in.into_iter().enumerate() {
-                self.port_grid.attach(port, 0, i.try_into().unwrap(), 1, 1);
+                self.port_grid.attach(port, 0, i as i32, 1, 1);
             }
 
             for (i, port) in ports_out.into_iter().enumerate() {
-                self.port_grid.attach(port, 1, i.try_into().unwrap(), 1, 1);
+                self.port_grid.attach(port, 1, i as i32, 1, 1);
             }
         }
     }

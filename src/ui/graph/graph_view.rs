@@ -26,9 +26,7 @@ use adw::{
     subclass::prelude::*,
 };
 
-use std::cmp::Ordering;
-
-use super::{Link, Node, Port};
+use super::{placement, Link, Node, Port};
 use crate::NodeType;
 
 const CANVAS_SIZE: f64 = 5000.0;
@@ -63,13 +61,25 @@ mod imp {
         }
     }
 
+    pub type NodePositionChanged = Box<dyn Fn(&Node, Point)>;
+
     pub struct DragState {
-        node: glib::WeakRef<Node>,
-        /// This stores the offset of the pointer to the origin of the node,
-        /// so that we can keep the pointer over the same position when moving the node
+        /// The nodes being moved, each with the offset of the pointer to its
+        /// origin, so that the pointer stays over the same spot of every node.
         ///
-        /// The offset is normalized to the default zoom-level of 1.0.
-        offset: Point,
+        /// The offsets are normalized to the default zoom-level of 1.0.
+        nodes: Vec<(glib::WeakRef<Node>, Point)>,
+        /// A selected node that was shift-clicked: it is deselected if the
+        /// pointer is released without moving.
+        deselect_on_click: Option<glib::WeakRef<Node>>,
+    }
+
+    /// An ongoing rubber-band selection, in screen space.
+    pub struct RubberBand {
+        start: Point,
+        end: Point,
+        /// What was selected before the band started (kept when extending).
+        base_selection: HashSet<Node>,
     }
 
     pub struct GraphView {
@@ -85,6 +95,11 @@ mod imp {
 
         /// This keeps track of an ongoing node drag operation.
         pub dragged_node: RefCell<Option<DragState>>,
+        pub selection: RefCell<HashSet<Node>>,
+        pub rubber_band: RefCell<Option<RubberBand>>,
+        /// Nodes the user hasn't placed, with their column, in the order
+        /// they were added. They are stacked automatically as they grow.
+        pub auto_placed: RefCell<Vec<(Node, usize)>>,
 
         // These keep track of an ongoing port drag operation
         pub dragged_port: glib::WeakRef<Port>,
@@ -97,7 +112,7 @@ mod imp {
         // This keeps track of an ongoing move view gesture.
         pub move_view_state: Cell<(f64, f64)>,
 
-        pub node_position_changed: RefCell<Option<Box<dyn Fn(&Node, Point)>>>,
+        pub node_position_changed: RefCell<Option<NodePositionChanged>>,
     }
 
     impl Default for GraphView {
@@ -109,6 +124,9 @@ mod imp {
                 vadjustment: Default::default(),
                 zoom_factor: Default::default(),
                 dragged_node: Default::default(),
+                selection: Default::default(),
+                rubber_band: Default::default(),
+                auto_placed: Default::default(),
                 dragged_port: Default::default(),
                 port_drag_cursor: Cell::new(Point::new(0.0, 0.0)),
                 zoom_gesture_initial_zoom: Default::default(),
@@ -194,8 +212,10 @@ mod imp {
                 }
                 "hscroll-policy" | "vscroll-policy" => {}
                 "zoom-factor" => {
-                    self.zoom_factor.set(value.get().unwrap());
-                    obj.queue_allocate();
+                    if let Ok(zoom_factor) = value.get() {
+                        self.zoom_factor.set(zoom_factor);
+                        obj.queue_allocate();
+                    }
                 }
                 _ => unimplemented!(),
             }
@@ -205,6 +225,8 @@ mod imp {
     impl WidgetImpl for GraphView {
         fn size_allocate(&self, _width: i32, _height: i32, baseline: i32) {
             let widget = &*self.obj();
+
+            self.place_auto_nodes();
 
             for (node, point) in self.nodes.borrow().iter() {
                 let (_, natural_size) = node.preferred_size();
@@ -242,6 +264,7 @@ mod imp {
                 .for_each(|(node, _)| widget.snapshot_child(node, snapshot));
 
             self.snapshot_links(widget, snapshot);
+            self.snapshot_rubber_band(widget, snapshot);
         }
     }
 
@@ -255,8 +278,16 @@ mod imp {
         ///
         /// This is the inverted form of [`Self::screen_space_to_canvas_space_transform()`].
         fn canvas_space_to_screen_space_transform(&self) -> gsk::Transform {
-            let hadj = self.hadjustment.borrow().as_ref().unwrap().value();
-            let vadj = self.vadjustment.borrow().as_ref().unwrap().value();
+            let hadj = self
+                .hadjustment
+                .borrow()
+                .as_ref()
+                .map_or(0.0, |adj| adj.value());
+            let vadj = self
+                .vadjustment
+                .borrow()
+                .as_ref()
+                .map_or(0.0, |adj| adj.value());
             let zoom_factor = self.zoom_factor.get();
 
             gsk::Transform::new()
@@ -270,97 +301,276 @@ mod imp {
         pub(super) fn screen_space_to_canvas_space_transform(&self) -> gsk::Transform {
             self.canvas_space_to_screen_space_transform()
                 .invert()
-                .unwrap()
+                .unwrap_or_else(|_| gsk::Transform::new())
+        }
+
+        /// Stack the nodes the user hasn't placed so they don't overlap.
+        fn place_auto_nodes(&self) {
+            let auto_placed = self.auto_placed.borrow();
+            if auto_placed.is_empty() {
+                return;
+            }
+            let auto: HashSet<&Node> = auto_placed.iter().map(|(node, _)| node).collect();
+            let size = |node: &Node| {
+                let (_, natural) = node.preferred_size();
+                (natural.width() as f32, natural.height() as f32)
+            };
+
+            let mut nodes = self.nodes.borrow_mut();
+            let taken: Vec<_> = nodes
+                .iter()
+                .filter(|(node, _)| node.is_visible() && !auto.contains(node))
+                .map(|(node, point)| {
+                    let (width, height) = size(node);
+                    placement::Rect {
+                        x: point.x(),
+                        y: point.y(),
+                        width,
+                        height,
+                    }
+                })
+                .collect();
+            let visible: Vec<_> = auto_placed
+                .iter()
+                .filter(|(node, _)| node.is_visible())
+                .collect();
+            let sizes: Vec<_> = visible
+                .iter()
+                .map(|(node, column)| {
+                    let (width, height) = size(node);
+                    (*column, width, height)
+                })
+                .collect();
+            let positions = placement::stack(&taken, &sizes, 3);
+            for ((node, _), (x, y)) in visible.into_iter().zip(positions) {
+                nodes.insert(node.clone(), Point::new(x, y));
+            }
+        }
+
+        /// The canvas-space rectangle a node covers.
+        fn node_rect(&self, node: &Node, position: &Point) -> graphene::Rect {
+            graphene::Rect::new(
+                position.x(),
+                position.y(),
+                node.width() as f32,
+                node.height() as f32,
+            )
+        }
+
+        pub(super) fn set_selection(&self, selection: HashSet<Node>) {
+            let mut current = self.selection.borrow_mut();
+            for node in current.difference(&selection) {
+                node.remove_css_class("selected-node");
+            }
+            for node in selection.difference(&current) {
+                node.add_css_class("selected-node");
+            }
+            *current = selection;
+        }
+
+        fn update_rubber_band(&self, end: Point) {
+            let mut rubber_band = self.rubber_band.borrow_mut();
+            let Some(band) = rubber_band.as_mut() else {
+                return;
+            };
+            band.end = end;
+            let transform = self.screen_space_to_canvas_space_transform();
+            let start = transform.transform_point(&band.start);
+            let end = transform.transform_point(&band.end);
+            let area = graphene::Rect::new(
+                start.x().min(end.x()),
+                start.y().min(end.y()),
+                (start.x() - end.x()).abs(),
+                (start.y() - end.y()).abs(),
+            );
+            let mut selection = band.base_selection.clone();
+            selection.extend(
+                self.nodes
+                    .borrow()
+                    .iter()
+                    .filter(|(node, position)| {
+                        node.is_visible()
+                            && self.node_rect(node, position).intersection(&area).is_some()
+                    })
+                    .map(|(node, _)| node.clone()),
+            );
+            drop(rubber_band);
+            self.set_selection(selection);
+            self.obj().queue_draw();
+        }
+
+        fn snapshot_rubber_band(&self, widget: &super::GraphView, snapshot: &gtk::Snapshot) {
+            let rubber_band = self.rubber_band.borrow();
+            let Some(band) = rubber_band.as_ref() else {
+                return;
+            };
+            let area = graphene::Rect::new(
+                band.start.x().min(band.end.x()),
+                band.start.y().min(band.end.y()),
+                (band.start.x() - band.end.x()).abs(),
+                (band.start.y() - band.end.y()).abs(),
+            );
+            let accent = widget
+                .style_context()
+                .lookup_color("accent_bg_color")
+                .unwrap_or_else(|| gdk::RGBA::new(0.21, 0.52, 0.89, 1.0));
+            let mut fill = accent;
+            fill.set_alpha(0.15);
+            snapshot.append_color(&fill, &area);
+            snapshot.append_border(
+                &gsk::RoundedRect::from_rect(area, 0.0),
+                &[1.0; 4],
+                &[accent; 4],
+            );
+        }
+
+        /// Start moving the selection, or a rubber band when starting on the canvas.
+        ///
+        /// Clicking a node selects it; shift- or ctrl-clicking adds it to the
+        /// selection or removes it again.
+        fn begin_node_drag(&self, x: f64, y: f64, extend: bool) {
+            let widget = self.obj();
+            // pick() should at least return the widget itself.
+            let Some(target) = widget.pick(x, y, gtk::PickFlags::DEFAULT) else {
+                return;
+            };
+            if target.ancestor(Port::static_type()).is_some()
+                || target.ancestor(gtk::TextView::static_type()).is_some()
+                || target.ancestor(gtk::Scale::static_type()).is_some()
+            {
+                // Ports, comment text and sliders handle their own dragging.
+                return;
+            }
+
+            let cursor = Point::new(x as f32, y as f32);
+            let Some(node) = target.ancestor(Node::static_type()).and_downcast::<Node>() else {
+                let base_selection = if extend {
+                    self.selection.borrow().clone()
+                } else {
+                    HashSet::new()
+                };
+                self.set_selection(base_selection.clone());
+                self.rubber_band.replace(Some(RubberBand {
+                    start: cursor,
+                    end: cursor,
+                    base_selection,
+                }));
+                return;
+            };
+
+            let mut selection = self.selection.borrow().clone();
+            let mut deselect_on_click = None;
+            if extend && selection.contains(&node) {
+                deselect_on_click = Some(node.downgrade());
+            } else if extend {
+                selection.insert(node.clone());
+            } else if !selection.contains(&node) {
+                selection = HashSet::from([node.clone()]);
+            }
+            self.set_selection(selection);
+
+            let canvas_cursor = self
+                .screen_space_to_canvas_space_transform()
+                .transform_point(&cursor);
+            let nodes = self.nodes.borrow();
+            let dragged = self
+                .selection
+                .borrow()
+                .iter()
+                .filter_map(|node| {
+                    let position = nodes.get(node)?;
+                    Some((
+                        node.downgrade(),
+                        Point::new(
+                            canvas_cursor.x() - position.x(),
+                            canvas_cursor.y() - position.y(),
+                        ),
+                    ))
+                })
+                .collect();
+            drop(nodes);
+            self.dragged_node.replace(Some(DragState {
+                nodes: dragged,
+                deselect_on_click,
+            }));
         }
 
         fn setup_node_dragging(&self) {
             let drag_controller = gtk::GestureDrag::new();
 
             drag_controller.connect_drag_begin(|drag_controller, x, y| {
-                let widget = drag_controller
-                    .widget()
-                    .dynamic_cast::<super::GraphView>()
-                    .expect("drag-begin event is not on the GraphView");
-                let mut dragged_node = widget.imp().dragged_node.borrow_mut();
-
-                // pick() should at least return the widget itself.
-                let target = widget
-                    .pick(x, y, gtk::PickFlags::DEFAULT)
-                    .expect("drag-begin pick() did not return a widget");
-                *dragged_node = if target.ancestor(Port::static_type()).is_some()
-                    || target.ancestor(gtk::TextView::static_type()).is_some()
-                {
-                    // The user targeted a port, so the dragging should be handled by the Port
-                    // component instead of here.
-                    None
-                } else if let Some(target) = target.ancestor(Node::static_type()) {
-                    // The user targeted a Node without targeting a specific Port.
-                    // Drag the Node around the screen.
-                    let node = target.dynamic_cast_ref::<Node>().unwrap();
-
-                    let Some(canvas_node_pos) = widget.node_position(node) else {
-                        return;
-                    };
-                    let canvas_cursor_pos = widget
-                        .imp()
-                        .screen_space_to_canvas_space_transform()
-                        .transform_point(&Point::new(x as f32, y as f32));
-
-                    Some(DragState {
-                        node: node.clone().downgrade(),
-                        offset: Point::new(
-                            canvas_cursor_pos.x() - canvas_node_pos.x(),
-                            canvas_cursor_pos.y() - canvas_node_pos.y(),
-                        ),
-                    })
-                } else {
-                    None
-                }
+                let Ok(widget) = drag_controller.widget().dynamic_cast::<super::GraphView>() else {
+                    return;
+                };
+                let extend = drag_controller
+                    .current_event_state()
+                    .intersects(gdk::ModifierType::SHIFT_MASK | gdk::ModifierType::CONTROL_MASK);
+                widget.imp().begin_node_drag(x, y, extend);
             });
             drag_controller.connect_drag_update(|drag_controller, x, y| {
-                let widget = drag_controller
-                    .widget()
-                    .dynamic_cast::<super::GraphView>()
-                    .expect("drag-update event is not on the GraphView");
+                let Ok(widget) = drag_controller.widget().dynamic_cast::<super::GraphView>() else {
+                    return;
+                };
+                let Some((start_x, start_y)) = drag_controller.start_point() else {
+                    return;
+                };
+                let cursor = Point::new((start_x + x) as f32, (start_y + y) as f32);
+                if widget.imp().rubber_band.borrow().is_some() {
+                    widget.imp().update_rubber_band(cursor);
+                    return;
+                }
+
                 let dragged_node = widget.imp().dragged_node.borrow();
-                let Some(DragState { node, offset }) = dragged_node.as_ref() else {
+                let Some(drag_state) = dragged_node.as_ref() else {
                     return;
                 };
-                let Some(node) = node.upgrade() else { return };
-
-                let (start_x, start_y) = drag_controller
-                    .start_point()
-                    .expect("Drag has no start point");
-
-                let onscreen_node_origin = Point::new((start_x + x) as f32, (start_y + y) as f32);
-                let transform = widget.imp().screen_space_to_canvas_space_transform();
-                let canvas_node_origin = transform.transform_point(&onscreen_node_origin);
-
-                widget.set_node_position(
-                    &node,
-                    &Point::new(
-                        canvas_node_origin.x() - offset.x(),
-                        canvas_node_origin.y() - offset.y(),
-                    ),
-                );
+                let canvas_cursor = widget
+                    .imp()
+                    .screen_space_to_canvas_space_transform()
+                    .transform_point(&cursor);
+                for (node, offset) in &drag_state.nodes {
+                    let Some(node) = node.upgrade() else { continue };
+                    widget.set_node_position(
+                        &node,
+                        &Point::new(
+                            canvas_cursor.x() - offset.x(),
+                            canvas_cursor.y() - offset.y(),
+                        ),
+                    );
+                }
             });
-            drag_controller.connect_drag_end(|drag_controller, _, _| {
-                let widget = drag_controller
-                    .widget()
-                    .dynamic_cast::<super::GraphView>()
-                    .expect("drag-end event is not on the GraphView");
-                let Some(drag_state) = widget.imp().dragged_node.borrow_mut().take() else {
+            drag_controller.connect_drag_end(|drag_controller, x, y| {
+                let Ok(widget) = drag_controller.widget().dynamic_cast::<super::GraphView>() else {
                     return;
                 };
-                let Some(node) = drag_state.node.upgrade() else {
+                let imp = widget.imp();
+                if imp.rubber_band.take().is_some() {
+                    widget.queue_draw();
+                    return;
+                }
+                let Some(drag_state) = imp.dragged_node.borrow_mut().take() else {
                     return;
                 };
-                let Some(position) = widget.node_position(&node) else {
+                let moved = x.hypot(y) > 3.0;
+                if !moved {
+                    if let Some(node) = drag_state.deselect_on_click.and_then(|node| node.upgrade())
+                    {
+                        let mut selection = imp.selection.borrow().clone();
+                        selection.remove(&node);
+                        imp.set_selection(selection);
+                    }
+                    return;
+                }
+                let callback = imp.node_position_changed.borrow();
+                let Some(callback) = callback.as_ref() else {
                     return;
                 };
-                if let Some(callback) = widget.imp().node_position_changed.borrow().as_ref() {
-                    callback(&node, position);
-                };
+                for (node, _) in drag_state.nodes {
+                    let Some(node) = node.upgrade() else { continue };
+                    if let Some(position) = widget.node_position(&node) {
+                        callback(&node, position);
+                    }
+                }
             });
             self.obj().add_controller(drag_controller);
         }
@@ -369,28 +579,25 @@ mod imp {
             let controller = gtk::DropControllerMotion::new();
 
             controller.connect_enter(|controller, x, y| {
-                let graph = controller
-                    .widget()
-                    .downcast::<super::GraphView>()
-                    .expect("Widget should be a graphview");
+                let Ok(graph) = controller.widget().downcast::<super::GraphView>() else {
+                    return;
+                };
 
                 graph.imp().port_drag_enter(controller, x, y)
             });
 
             controller.connect_motion(|controller, x, y| {
-                let graph = controller
-                    .widget()
-                    .downcast::<super::GraphView>()
-                    .expect("Widget should be a graphview");
+                let Ok(graph) = controller.widget().downcast::<super::GraphView>() else {
+                    return;
+                };
 
                 graph.imp().port_drag_motion(x, y)
             });
 
             controller.connect_leave(|controller| {
-                let graph = controller
-                    .widget()
-                    .downcast::<super::GraphView>()
-                    .expect("Widget should be a graphview");
+                let Ok(graph) = controller.widget().downcast::<super::GraphView>() else {
+                    return;
+                };
 
                 graph.imp().port_drag_leave()
             });
@@ -413,7 +620,9 @@ mod imp {
                     let Ok(value) = value else {
                         return;
                     };
-                    let port: &Port = value.get().expect("Value should contain a port");
+                    let Ok(port) = value.get::<&Port>() else {
+                        return;
+                    };
 
                     imp.dragged_port.set(Some(port));
                 }),
@@ -445,16 +654,17 @@ mod imp {
                 gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
 
             scroll_controller.connect_scroll(|eventcontroller, _, delta_y| {
-                let event = eventcontroller.current_event().unwrap(); // We are inside the event handler, so it must have an event
+                let Some(event) = eventcontroller.current_event() else {
+                    return glib::Propagation::Proceed;
+                };
 
                 if event
                     .modifier_state()
                     .contains(gdk::ModifierType::CONTROL_MASK)
                 {
-                    let widget = eventcontroller
-                        .widget()
-                        .downcast::<super::GraphView>()
-                        .unwrap();
+                    let Ok(widget) = eventcontroller.widget().downcast::<super::GraphView>() else {
+                        return glib::Propagation::Proceed;
+                    };
                     widget.set_zoom_factor(widget.zoom_factor() + (0.1 * -delta_y), None);
 
                     glib::Propagation::Stop
@@ -468,7 +678,9 @@ mod imp {
         fn setup_zoom_gesture(&self) {
             let zoom_gesture = gtk::GestureZoom::new();
             zoom_gesture.connect_begin(|gesture, _| {
-                let widget = gesture.widget().downcast::<super::GraphView>().unwrap();
+                let Ok(widget) = gesture.widget().downcast::<super::GraphView>() else {
+                    return;
+                };
 
                 widget
                     .imp()
@@ -480,13 +692,13 @@ mod imp {
                     .set(gesture.bounding_box_center());
             });
             zoom_gesture.connect_scale_changed(move |gesture, delta| {
-                let widget = gesture.widget().downcast::<super::GraphView>().unwrap();
+                let Ok(widget) = gesture.widget().downcast::<super::GraphView>() else {
+                    return;
+                };
 
-                let initial_zoom = widget
-                    .imp()
-                    .zoom_gesture_initial_zoom
-                    .get()
-                    .expect("Initial zoom not set during zoom gesture");
+                let Some(initial_zoom) = widget.imp().zoom_gesture_initial_zoom.get() else {
+                    return;
+                };
 
                 widget.set_zoom_factor(initial_zoom * delta, gesture.bounding_box_center());
             });
@@ -501,19 +713,17 @@ mod imp {
             // TODO: set `all-scroll` cursor while dragging view
 
             drag_controller.connect_drag_begin(|drag_controller, _, _| {
-                let widget = drag_controller
-                    .widget()
-                    .downcast::<super::GraphView>()
-                    .unwrap();
+                let Ok(widget) = drag_controller.widget().downcast::<super::GraphView>() else {
+                    return;
+                };
 
                 widget.imp().move_view_state.set((0.0, 0.0));
             });
 
             drag_controller.connect_drag_update(|drag_controller, x, y| {
-                let widget = drag_controller
-                    .widget()
-                    .downcast::<super::GraphView>()
-                    .unwrap();
+                let Ok(widget) = drag_controller.widget().downcast::<super::GraphView>() else {
+                    return;
+                };
 
                 let imp = widget.imp();
                 let state = imp.move_view_state.replace((x, y));
@@ -522,8 +732,11 @@ mod imp {
 
                 let hadjustment_ref = imp.hadjustment.borrow();
                 let vadjustment_ref = imp.vadjustment.borrow();
-                let hadjustment = hadjustment_ref.as_ref().unwrap();
-                let vadjustment = vadjustment_ref.as_ref().unwrap();
+                let (Some(hadjustment), Some(vadjustment)) =
+                    (hadjustment_ref.as_ref(), vadjustment_ref.as_ref())
+                else {
+                    return;
+                };
 
                 let new_hadjustment = hadjustment.value() + delta_x;
                 let new_vadjustment = vadjustment.value() + delta_y;
@@ -635,23 +848,20 @@ mod imp {
 
             link_cr.set_line_width(2.0 * self.zoom_factor.get());
 
+            let lookup_color = |name: &str| {
+                widget
+                    .style_context()
+                    .lookup_color(name)
+                    .unwrap_or_else(|| {
+                        warn!("Color {name} not found in the stylesheet");
+                        gdk::RGBA::new(0.5, 0.5, 0.5, 1.0)
+                    })
+            };
             let colors = Colors {
-                audio: widget
-                    .style_context()
-                    .lookup_color("media-type-audio")
-                    .expect("color not found"),
-                video: widget
-                    .style_context()
-                    .lookup_color("media-type-video")
-                    .expect("color not found"),
-                midi: widget
-                    .style_context()
-                    .lookup_color("media-type-midi")
-                    .expect("color not found"),
-                unknown: widget
-                    .style_context()
-                    .lookup_color("media-type-unknown")
-                    .expect("color not found"),
+                audio: lookup_color("media-type-audio"),
+                video: lookup_color("media-type-video"),
+                midi: lookup_color("media-type-midi"),
+                unknown: lookup_color("media-type-unknown"),
             };
 
             for link in self.links.borrow().iter().filter(|link| link.visible()) {
@@ -781,8 +991,12 @@ impl GraphView {
         let old_zoom = self.imp().zoom_factor.get();
         let hadjustment_ref = self.imp().hadjustment.borrow();
         let vadjustment_ref = self.imp().vadjustment.borrow();
-        let hadjustment = hadjustment_ref.as_ref().unwrap();
-        let vadjustment = vadjustment_ref.as_ref().unwrap();
+        let (Some(hadjustment), Some(vadjustment)) =
+            (hadjustment_ref.as_ref(), vadjustment_ref.as_ref())
+        else {
+            self.set_property("zoom-factor", zoom_factor);
+            return;
+        };
 
         let x_total = (anchor_x_screen + hadjustment.value()) / old_zoom;
         let y_total = (anchor_y_screen + vadjustment.value()) / old_zoom;
@@ -796,40 +1010,27 @@ impl GraphView {
         self.set_property("zoom-factor", zoom_factor);
     }
 
+    /// Add a node. Until it is moved or given a position, it is stacked in
+    /// a column for its type: outputs on the left, inputs on the right.
     pub fn add_node(&self, node: Node, node_type: Option<NodeType>) {
         let imp = self.imp();
         node.set_parent(self);
-
-        // Place widgets in colums of 3, growing down
-        let x = if let Some(node_type) = node_type {
-            match node_type {
-                NodeType::Output => 20.0,
-                NodeType::Input => 820.0,
-            }
-        } else {
-            420.0
+        let column = match node_type {
+            Some(NodeType::Output) => 0,
+            None => 1,
+            Some(NodeType::Input) => 2,
         };
+        imp.auto_placed.borrow_mut().push((node.clone(), column));
+        imp.nodes
+            .borrow_mut()
+            .insert(node, Point::new(placement::ORIGIN.0, placement::ORIGIN.1));
+        self.queue_allocate();
+    }
 
-        let y = imp
-            .nodes
-            .borrow()
-            .iter()
-            .map(|node| {
-                // Map nodes to their locations
-                let point = self.node_position(&node.0.clone().upcast()).unwrap();
-                (point.x(), point.y())
-            })
-            .filter(|(x2, _)| {
-                // Only look for other nodes that have a similar x coordinate
-                (x - x2).abs() < 50.0
-            })
-            .max_by(|y1, y2| {
-                // Get max in column
-                y1.partial_cmp(y2).unwrap_or(Ordering::Equal)
-            })
-            .map_or(20_f32, |(_x, y)| y + 120.0);
-
-        imp.nodes.borrow_mut().insert(node, Point::new(x, y));
+    /// Stop drawing the link that follows the pointer during a port drag.
+    pub fn end_port_drag(&self) {
+        self.imp().dragged_port.set(None);
+        self.queue_draw();
     }
 
     pub fn set_node_position_changed_handler(&self, callback: impl Fn(&Node, Point) + 'static) {
@@ -839,7 +1040,12 @@ impl GraphView {
     }
 
     pub fn remove_node(&self, node: &Node) {
-        let mut nodes = self.imp().nodes.borrow_mut();
+        let imp = self.imp();
+        imp.selection.borrow_mut().remove(node);
+        imp.auto_placed
+            .borrow_mut()
+            .retain(|(placed, _)| placed != node);
+        let mut nodes = imp.nodes.borrow_mut();
 
         if nodes.remove(node).is_some() {
             node.unparent();
@@ -881,6 +1087,14 @@ impl GraphView {
             }
             node.is_comment()
         });
+        self.imp()
+            .selection
+            .borrow_mut()
+            .retain(|node| node.is_comment());
+        self.imp()
+            .auto_placed
+            .borrow_mut()
+            .retain(|(node, _)| node.is_comment());
         self.queue_draw();
     }
 
@@ -901,9 +1115,17 @@ impl GraphView {
             ))
     }
 
+    /// Move a node. It is no longer placed automatically.
     pub fn set_node_position(&self, widget: &Node, point: &Point) {
+        self.imp()
+            .auto_placed
+            .borrow_mut()
+            .retain(|(node, _)| node != widget);
         let mut nodes = self.imp().nodes.borrow_mut();
-        let node_point = nodes.get_mut(widget).expect("Node is not on the graph");
+        let Some(node_point) = nodes.get_mut(widget) else {
+            log::warn!("Tried to move a node that is not on the graph");
+            return;
+        };
 
         // Clamp the new position to within the graph, so a node can't be moved outside it and be lost.
         node_point.set_x(point.x().clamp(

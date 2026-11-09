@@ -24,5 +24,6 @@ mod port_handle;
 pub use port_handle::*;
 mod link;
 pub use link::*;
+mod placement;
 mod zoomentry;
 pub use zoomentry::*;

@@ -30,7 +30,7 @@ mod state_updates;
 use std::{cell::RefCell, collections::HashMap, io::Cursor, rc::Rc, time::Duration};
 
 use adw::glib::clone;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use pipewire::{
     channel::Receiver as PwReceiver,
     context::ContextRc,
@@ -312,7 +312,8 @@ pub(super) fn thread_main(gtk_sender: GtkSender, mut pw_receiver: PwReceiver<Gtk
             .error(
                 clone!(@strong mainloop, @strong gtk_sender => move |id, _seq, res, message| {
                     if id != PW_ID_CORE {
-                        warn!("PipeWire error on object {id} ({res}): {message}");
+                        // Routine, e.g. enumerating Props on nodes that have no volume.
+                        debug!("PipeWire error on object {id} ({res}): {message}");
                         return;
                     }
 

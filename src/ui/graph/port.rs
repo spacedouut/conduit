@@ -207,8 +207,6 @@ mod imp {
             // The port will simply provide its pipewire id to the drag target.
             // The drop target will accept the source port and use it to emit its `port-toggled` signal.
 
-            // FIXME: We should protect against different media types, e.g. it should not be possible to drop a video port on an audio port.
-
             let drag_src = gtk::DragSource::builder()
                 .content(&gdk::ContentProvider::for_value(&obj.to_value()))
                 .build();
@@ -261,7 +259,7 @@ mod imp {
                     return;
                 };
 
-                // Disallow drags between two ports that have the same direction
+                // Disallow drags between incompatible ports
                 if !port.is_linkable_to(&other_port) {
                     // FIXME: For some reason, this prints error:
                     //        "gdk_drop_get_actions: assertion 'GDK_IS_DROP (self)' failed"
@@ -370,6 +368,55 @@ impl Port {
     }
 
     pub fn is_linkable_to(&self, other_port: &Self) -> bool {
-        self.direction() != other_port.direction()
+        ports_are_compatible(
+            self.direction(),
+            self.media_type(),
+            other_port.direction(),
+            other_port.media_type(),
+        )
+    }
+}
+
+fn ports_are_compatible(
+    direction: u32,
+    media_type: u32,
+    other_direction: u32,
+    other_media_type: u32,
+) -> bool {
+    direction != other_direction && media_type == other_media_type
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pipewire::spa::param::format::MediaType;
+
+    #[test]
+    fn port_compatibility_requires_matching_media_types_and_opposite_directions() {
+        let media_types = [
+            MediaType::Audio,
+            MediaType::Video,
+            MediaType::Application,
+            MediaType::Stream,
+            MediaType::Unknown,
+        ];
+        for media_type in media_types {
+            for other_media_type in media_types {
+                for direction in [Direction::Input, Direction::Output] {
+                    for other_direction in [Direction::Input, Direction::Output] {
+                        assert_eq!(
+                            ports_are_compatible(
+                                direction.as_raw(),
+                                media_type.as_raw(),
+                                other_direction.as_raw(),
+                                other_media_type.as_raw(),
+                            ),
+                            direction != other_direction && media_type == other_media_type,
+                            "{direction:?}/{media_type:?} -> {other_direction:?}/{other_media_type:?}",
+                        );
+                    }
+                }
+            }
+        }
     }
 }

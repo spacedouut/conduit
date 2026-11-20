@@ -105,7 +105,7 @@ jobs:
 
       - name: Run cargo test and cargo clippy
         run: |
-          flatpak run --share=network --filesystem="$PWD" \
+          flatpak run --user --share=network --filesystem="$PWD" \
             --env=PATH=/usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm20/bin:/usr/bin \
             --env=LD_LIBRARY_PATH=/usr/lib/sdk/llvm20/lib \
             --env=BINDGEN_EXTRA_CLANG_ARGS="-include $PWD/build-aux/bindgen-compat.h" \

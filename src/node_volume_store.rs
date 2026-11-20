@@ -95,6 +95,7 @@ mod tests {
         let mut store = NodeVolumeStore::default();
         assert!(store.set_volume("alsa_output.pci-0000_00_1f.3.analog-stereo", 0.42));
         assert!(store.set_volume("Firefox", 1.25));
+        assert!(store.set_volume("Firefox#2", 0.5));
         assert!(!store.set_volume("Firefox", 1.25));
         let parsed = parse(&serialize(&store.volumes));
         assert_eq!(parsed, store.volumes);

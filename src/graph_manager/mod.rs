@@ -274,11 +274,11 @@ mod imp {
                 }),
             );
 
+            let key = self.topology.borrow_mut().add_node(id, info);
             self.volumes
                 .borrow_mut()
-                .node_added(id, &info.key, &self.devices.borrow().store);
-            let position = self.node_layout.borrow().position(&info.key);
-            self.topology.borrow_mut().add_node(id, info);
+                .node_added(id, &key, &self.devices.borrow().store);
+            let position = self.node_layout.borrow().position(&key);
             self.items.borrow_mut().insert(id, node.clone().upcast());
 
             self.obj().graph().add_node(node.clone(), node_type);

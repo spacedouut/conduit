@@ -15,7 +15,7 @@ pub(super) struct PortInfo {
 
 #[derive(Clone)]
 pub(super) struct NodeInfo {
-    /// Stable `node.name`, used to remember layout, volume and links.
+    /// Live-unique `node.name`, used to remember layout, volume and links.
     pub key: String,
     pub is_meter: bool,
     /// An application stream, routed by the session manager.
@@ -30,8 +30,20 @@ pub(super) struct Topology {
 }
 
 impl Topology {
-    pub fn add_node(&mut self, id: u32, info: NodeInfo) {
+    pub fn add_node(&mut self, id: u32, mut info: NodeInfo) -> String {
+        let base = info.key.clone();
+        let mut suffix = 2;
+        while self
+            .nodes
+            .iter()
+            .any(|(node_id, node)| *node_id != id && node.key == info.key)
+        {
+            info.key = format!("{base}#{suffix}");
+            suffix += 1;
+        }
+        let key = info.key.clone();
         self.nodes.insert(id, info);
+        key
     }
 
     pub fn remove_node(&mut self, id: u32) {
@@ -72,5 +84,67 @@ impl Topology {
     pub fn clear(&mut self) {
         self.nodes.clear();
         self.ports.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{node_layout::NodeLayout, node_volume_store::NodeVolumeStore};
+
+    fn add(topology: &mut Topology, id: u32, key: &str) -> String {
+        topology.add_node(
+            id,
+            NodeInfo {
+                key: key.to_string(),
+                is_meter: false,
+                is_stream: true,
+            },
+        )
+    }
+
+    #[test]
+    fn duplicate_streams_keep_distinct_saved_state() {
+        let mut topology = Topology::default();
+        let first = add(&mut topology, 1, "Firefox");
+        let second = add(&mut topology, 2, "Firefox");
+        assert_eq!(first, "Firefox");
+        assert_eq!(second, "Firefox#2");
+        assert_eq!(topology.node_key(2), Some(second.as_str()));
+
+        let mut layout = NodeLayout::default();
+        let mut volumes = NodeVolumeStore::default();
+        assert_eq!(layout.position(&first), None);
+        assert_eq!(volumes.volume(&second), None);
+        layout.set_position(first.clone(), 10.0, 20.0);
+        layout.set_position(second.clone(), 30.0, 40.0);
+        volumes.set_volume(&first, 0.4);
+        volumes.set_volume(&second, 0.8);
+        assert_eq!(layout.position(&first), Some((10.0, 20.0)));
+        assert_eq!(layout.position(&second), Some((30.0, 40.0)));
+        assert_eq!(volumes.volume(&first), Some(0.4));
+        assert_eq!(volumes.volume(&second), Some(0.8));
+    }
+
+    #[test]
+    fn removed_keys_are_reused_lowest_first() {
+        let mut topology = Topology::default();
+        assert_eq!(add(&mut topology, 1, "Firefox"), "Firefox");
+        assert_eq!(add(&mut topology, 2, "Firefox"), "Firefox#2");
+        assert_eq!(add(&mut topology, 3, "Firefox"), "Firefox#3");
+        topology.remove_node(2);
+        assert_eq!(add(&mut topology, 4, "Firefox"), "Firefox#2");
+        topology.remove_node(1);
+        assert_eq!(add(&mut topology, 5, "Firefox"), "Firefox");
+        topology.clear();
+        assert_eq!(add(&mut topology, 6, "Firefox"), "Firefox");
+    }
+
+    #[test]
+    fn literal_suffixes_do_not_collide() {
+        let mut topology = Topology::default();
+        add(&mut topology, 1, "Firefox#2");
+        add(&mut topology, 2, "Firefox");
+        assert_eq!(add(&mut topology, 3, "Firefox"), "Firefox#3");
     }
 }

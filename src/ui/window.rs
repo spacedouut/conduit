@@ -59,12 +59,7 @@ mod imp {
     #[glib::derived_properties]
     impl ObjectImpl for Window {}
     impl WidgetImpl for Window {}
-    impl WindowImpl for Window {
-        fn close_request(&self) -> glib::Propagation {
-            self.obj().hide();
-            glib::Propagation::Stop
-        }
-    }
+    impl WindowImpl for Window {}
     impl ApplicationWindowImpl for Window {}
     impl AdwApplicationWindowImpl for Window {}
 }

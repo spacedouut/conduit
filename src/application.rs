@@ -47,7 +47,6 @@ mod imp {
         /// Set by `--hidden` (used by the autostart entry): the first
         /// activation only starts Conduit in the tray.
         pub(super) start_hidden: Cell<bool>,
-        pub(super) window_presented: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -146,7 +145,6 @@ mod imp {
         }
 
         pub(super) fn present_window(&self) {
-            self.window_presented.set(true);
             self.window.present();
         }
 
@@ -249,12 +247,14 @@ impl Application {
             while let Ok(action) = tray_receiver.recv().await {
                 match action {
                     crate::tray::Action::ShowWindow => app.imp().present_window(),
-                    crate::tray::Action::WindowUnreachable => {
-                        if app.imp().start_hidden.get() || !app.imp().window_presented.get() {
-                            app.imp().start_hidden.set(false);
-                            if app.imp().window.application().is_some() {
-                                app.imp().present_window();
-                            }
+                    // Closing only hides the window while the tray can bring it back.
+                    crate::tray::Action::Available => app.imp().window.set_hide_on_close(true),
+                    crate::tray::Action::Unavailable => {
+                        let window = &app.imp().window;
+                        window.set_hide_on_close(false);
+                        app.imp().start_hidden.set(false);
+                        if window.application().is_some() && !window.is_visible() {
+                            app.imp().present_window();
                         }
                     }
                     crate::tray::Action::Quit => app.quit(),

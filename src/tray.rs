@@ -2,6 +2,11 @@
 //
 // SPDX-License-Identifier: GPL-3.0-only
 
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+
 use async_channel::Sender;
 use ksni::{
     blocking::TrayMethods,
@@ -11,12 +16,16 @@ use ksni::{
 #[derive(Clone, Copy)]
 pub enum Action {
     ShowWindow,
-    WindowUnreachable,
+    /// The tray icon is registered with a tray host.
+    Available,
+    /// There is no tray host, so a hidden window can't be brought back.
+    Unavailable,
     Quit,
 }
 
 struct ConduitTray {
     action_sender: Sender<Action>,
+    online: Arc<AtomicBool>,
 }
 
 impl ksni::Tray for ConduitTray {
@@ -60,9 +69,14 @@ impl ksni::Tray for ConduitTray {
         ]
     }
 
+    fn watcher_online(&self) {
+        self.online.store(true, Ordering::SeqCst);
+        let _ = self.action_sender.try_send(Action::Available);
+    }
+
     fn watcher_offline(&self, _: ksni::OfflineReason) -> bool {
-        // Without a tray host there's no way back to a hidden window.
-        let _ = self.action_sender.try_send(Action::WindowUnreachable);
+        self.online.store(false, Ordering::SeqCst);
+        let _ = self.action_sender.try_send(Action::Unavailable);
         true
     }
 }
@@ -72,8 +86,10 @@ pub fn spawn(action_sender: Sender<Action>) {
     let spawned = std::thread::Builder::new()
         .name("conduit-tray".into())
         .spawn(move || {
+            let online = Arc::new(AtomicBool::new(true));
             let tray = ConduitTray {
                 action_sender: action_sender.clone(),
+                online: online.clone(),
             };
             // Flatpak apps may only own names under their app id, so skip the
             // well-known StatusNotifierItem name there.
@@ -83,17 +99,24 @@ pub fn spawn(action_sender: Sender<Action>) {
                 .assume_sni_available(true)
                 .spawn()
             {
-                Ok(_handle) => loop {
-                    std::thread::park();
-                },
+                Ok(_handle) => {
+                    // Registration failures during spawn already went to
+                    // `watcher_offline`.
+                    if online.load(Ordering::SeqCst) {
+                        let _ = action_sender.try_send(Action::Available);
+                    }
+                    loop {
+                        std::thread::park();
+                    }
+                }
                 Err(error) => {
                     log::warn!("Could not start system tray icon: {error}");
-                    let _ = action_sender.try_send(Action::WindowUnreachable);
+                    let _ = action_sender.try_send(Action::Unavailable);
                 }
             }
         });
     if let Err(error) = spawned {
         log::warn!("Could not start system tray thread: {error}");
-        let _ = fallback_sender.try_send(Action::WindowUnreachable);
+        let _ = fallback_sender.try_send(Action::Unavailable);
     }
 }

@@ -85,6 +85,36 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+  rust-checks:
+    name: Rust tests and Clippy
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-49
+      options: --privileged
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install GNOME SDK and Rust and LLVM extensions
+        run: |
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user --noninteractive flathub \
+            org.gnome.Sdk//49 \
+            org.freedesktop.Sdk.Extension.rust-stable//25.08 \
+            org.freedesktop.Sdk.Extension.llvm20//25.08
+
+      - name: Run cargo test and cargo clippy
+        run: |
+          flatpak run --share=network --filesystem="$PWD" \
+            --env=PATH=/usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm20/bin:/usr/bin \
+            --env=LD_LIBRARY_PATH=/usr/lib/sdk/llvm20/lib \
+            --env=BINDGEN_EXTRA_CLANG_ARGS="-include $PWD/build-aux/bindgen-compat.h" \
+            --env=CARGO_HOME="$PWD/target/flatpak-cargo" \
+            --command=sh org.gnome.Sdk//49 -ec '
+              cargo test --locked --target-dir target/flatpak
+              cargo clippy --locked --all-targets --target-dir target/flatpak
+            '
+
   deploy:
     name: Publish Flatpak repository
     needs: flatpak

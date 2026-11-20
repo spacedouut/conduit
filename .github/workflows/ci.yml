@@ -105,14 +105,16 @@ jobs:
 
       - name: Run cargo test and cargo clippy
         run: |
-          flatpak run --user --share=network --filesystem="$PWD" \
+          cargo_dir="$(mktemp -d "$RUNNER_TEMP/conduit-cargo.XXXXXX")"
+          flatpak run --user --share=network --filesystem="$PWD:ro" --filesystem="$cargo_dir" \
             --env=PATH=/usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm20/bin:/usr/bin \
             --env=LD_LIBRARY_PATH=/usr/lib/sdk/llvm20/lib \
             --env=BINDGEN_EXTRA_CLANG_ARGS="-include $PWD/build-aux/bindgen-compat.h" \
-            --env=CARGO_HOME="$PWD/target/flatpak-cargo" \
+            --env=CARGO_HOME="$cargo_dir/home" \
+            --env=CARGO_TARGET_DIR="$cargo_dir/target" \
             --command=sh org.gnome.Sdk//49 -ec '
-              cargo test --locked --target-dir target/flatpak
-              cargo clippy --locked --all-targets --target-dir target/flatpak
+              cargo test --locked
+              cargo clippy --locked --all-targets
             '
 
   deploy:

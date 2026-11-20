@@ -125,6 +125,7 @@ mod imp {
                     id,
                     &name,
                     NodeInfo {
+                        node_name: layout_key.clone(),
                         key: layout_key,
                         is_meter,
                         is_stream,
@@ -586,9 +587,7 @@ mod imp {
                     let Some(info) = topology.node(*id) else {
                         continue;
                     };
-                    let hidden = hidden_patterns
-                        .iter()
-                        .any(|pattern| pattern.is_match(&info.key));
+                    let hidden = info.matches_hidden_patterns(&hidden_patterns);
                     node.set_visible((self.show_meters.get() || !info.is_meter) && !hidden);
                 }
             }

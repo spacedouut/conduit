@@ -91,11 +91,12 @@ fn link_target(path: &Path) -> io::Result<PathBuf> {
 /// over something it did not create, and a file left behind by an interrupted
 /// save does not block later ones.
 fn create_temporary_file(path: &Path) -> io::Result<(fs::File, PathBuf)> {
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
     let mut attempt = 0;
     loop {
+        // Not derived from the file's own name, which may already be as long
+        // as the filesystem allows.
         let temporary_path =
-            path.with_file_name(format!(".{name}.{}-{attempt}.tmp", std::process::id()));
+            path.with_file_name(format!(".conduit-{}-{attempt}.tmp", std::process::id()));
         match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -196,6 +197,17 @@ mod tests {
             "theirs\n"
         );
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 2);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn write_handles_longest_file_name() {
+        let directory = test_directory("long-name");
+        let path = directory.join("s".repeat(255));
+
+        assert!(write_atomically(&path, "one\n", "test"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "one\n");
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
         let _ = fs::remove_dir_all(directory);
     }
 

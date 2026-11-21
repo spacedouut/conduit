@@ -6,6 +6,7 @@
 
 use std::{
     fs,
+    hash::{DefaultHasher, Hash, Hasher},
     io::{self, Write},
     path::{Path, PathBuf},
 };
@@ -91,12 +92,16 @@ fn link_target(path: &Path) -> io::Result<PathBuf> {
 /// over something it did not create, and a file left behind by an interrupted
 /// save does not block later ones.
 fn create_temporary_file(path: &Path) -> io::Result<(fs::File, PathBuf)> {
+    // Each file gets its own names, but by hash: its name may already be as
+    // long as the filesystem allows.
+    let mut hasher = DefaultHasher::new();
+    path.file_name().hash(&mut hasher);
+    let name = hasher.finish();
+    let process = std::process::id();
     let mut attempt = 0;
     loop {
-        // Not derived from the file's own name, which may already be as long
-        // as the filesystem allows.
         let temporary_path =
-            path.with_file_name(format!(".conduit-{}-{attempt}.tmp", std::process::id()));
+            path.with_file_name(format!(".conduit-{name:016x}-{process}-{attempt}.tmp"));
         match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -203,11 +208,30 @@ mod tests {
     #[test]
     fn write_handles_longest_file_name() {
         let directory = test_directory("long-name");
-        let path = directory.join("s".repeat(255));
+        // The longest name this filesystem accepts.
+        let path = (1..=255)
+            .rev()
+            .map(|length| directory.join("s".repeat(length)))
+            .find(|path| fs::write(path, "").is_ok())
+            .unwrap();
+        fs::remove_file(&path).unwrap();
 
         assert!(write_atomically(&path, "one\n", "test"));
         assert_eq!(fs::read_to_string(&path).unwrap(), "one\n");
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn files_in_one_directory_use_separate_temporary_files() {
+        let directory = test_directory("separate");
+        let (_, first) = create_temporary_file(&directory.join("comments")).unwrap();
+        let (_, second) = create_temporary_file(&directory.join("node-layout")).unwrap();
+        let (_, retry) = create_temporary_file(&directory.join("comments")).unwrap();
+
+        assert!(first.to_string_lossy().ends_with("-0.tmp"));
+        assert!(second.to_string_lossy().ends_with("-0.tmp"));
+        assert!(retry.to_string_lossy().ends_with("-1.tmp"));
         let _ = fs::remove_dir_all(directory);
     }
 

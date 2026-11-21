@@ -60,10 +60,11 @@ impl Topology {
             let Some(node) = self.nodes.get_mut(&id) else {
                 continue;
             };
-            let mut key = node.node_name.clone();
+            let base = escaped_base(&node.node_name);
+            let mut key = base.clone();
             let mut suffix = 2;
             while occupied.contains(&key) {
-                key = format!("{}#{suffix}", node.node_name);
+                key = format!("{base}#{suffix}");
                 suffix += 1;
             }
             occupied.insert(key.clone());
@@ -74,9 +75,7 @@ impl Topology {
                     key.clone(),
                 ));
                 if let Some(serial) = node.serial {
-                    self.slots
-                        .entries
-                        .insert(serial, (node.node_name.clone(), key));
+                    self.slots.entries.insert(serial, (base, key));
                 }
             }
         }
@@ -85,7 +84,8 @@ impl Topology {
     }
 
     pub fn add_node(&mut self, id: u32, mut info: NodeInfo) -> String {
-        let base = info.key.clone();
+        let base = escaped_base(&info.node_name);
+        info.key = base.clone();
         let occupied =
             |key: &str| {
                 self.nodes
@@ -175,6 +175,10 @@ impl Topology {
     }
 }
 
+fn escaped_base(name: &str) -> String {
+    name.replace('\\', "\\\\").replace('#', "\\#")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,9 +237,33 @@ mod tests {
     #[test]
     fn literal_suffixes_do_not_collide() {
         let mut topology = Topology::default();
-        add(&mut topology, 1, "Firefox#2");
-        add(&mut topology, 2, "Firefox");
-        assert_eq!(add(&mut topology, 3, "Firefox"), "Firefox#3");
+        assert_eq!(add(&mut topology, 1, "Firefox#2"), r"Firefox\#2");
+        assert_eq!(add(&mut topology, 2, "Firefox"), "Firefox");
+        assert_eq!(add(&mut topology, 3, "Firefox"), "Firefox#2");
+        assert_eq!(topology.node(1).unwrap().node_name, "Firefox#2");
+        topology.remove_node(1);
+        assert_eq!(add(&mut topology, 4, "Firefox"), "Firefox#3");
+    }
+
+    #[test]
+    fn escaped_bases_survive_slot_reuse_and_reconciliation() {
+        let mut topology = Topology::default();
+        let name = r"Firefox\#2";
+        let base = r"Firefox\\\#2";
+        assert_eq!(add(&mut topology, 1, name), base);
+        assert_eq!(topology.slots.entries[&1].0, base);
+        topology.clear();
+        topology.enumerating = true;
+        assert_eq!(add(&mut topology, 1, name), base);
+        assert!(topology.finish_enumeration().is_empty());
+        topology.clear();
+        topology.enumerating = true;
+        assert_eq!(add(&mut topology, 2, name), format!("{base}#2"));
+        assert_eq!(
+            topology.finish_enumeration(),
+            vec![(2, format!("{base}#2"), base.into())]
+        );
+        assert_eq!(topology.slots.entries[&2], (base.into(), base.into()));
     }
 
     #[test]

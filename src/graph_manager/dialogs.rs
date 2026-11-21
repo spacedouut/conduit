@@ -166,6 +166,26 @@ impl GraphManager {
         dialog.present();
     }
 
+    /// Tell the user which stored hidden-node patterns are not being applied.
+    pub(super) fn show_invalid_node_filter_warning(&self) {
+        let body = invalid_patterns_message(self.imp().node_filter.borrow().invalid_patterns());
+        let dialog = adw::MessageDialog::builder()
+            .transient_for(&self.window())
+            .modal(true)
+            .heading("Invalid hidden node patterns")
+            .body(body)
+            .close_response("close")
+            .default_response("edit")
+            .build();
+        dialog.add_response("close", "Close");
+        dialog.add_response("edit", "Edit Patterns");
+        dialog.connect_response(
+            Some("edit"),
+            glib::clone!(@weak self as manager => move |_, _| manager.show_node_filter_dialog()),
+        );
+        dialog.present();
+    }
+
     pub(super) fn show_node_filter_dialog(&self) {
         let dialog = gtk::Dialog::with_buttons(
             Some("Hidden node patterns"),
@@ -184,23 +204,51 @@ impl GraphManager {
             "One regular expression per line; matched PipeWire node.name values are hidden.",
         ));
         dialog.content_area().append(&entry);
-        dialog.connect_response(
-            glib::clone!(@weak self as manager, @weak entry => move |dialog, response| {
+
+        let error_label = gtk::Label::new(None);
+        error_label.set_xalign(0.0);
+        error_label.set_wrap(true);
+        error_label.set_selectable(true);
+        error_label.add_css_class("error");
+        {
+            let node_filter = self.imp().node_filter.borrow();
+            let invalid = node_filter.invalid_patterns();
+            error_label.set_text(&invalid_patterns_message(invalid));
+            error_label.set_visible(!invalid.is_empty());
+        }
+        dialog.content_area().append(&error_label);
+
+        dialog.connect_response(glib::clone!(
+            @weak self as manager,
+            @weak entry,
+            @weak error_label
+            => move |dialog, response| {
                 if response == gtk::ResponseType::Accept {
                     let buffer = entry.buffer();
                     let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
-                    manager.imp().node_filter.borrow_mut().set_patterns(
-                        text.lines()
-                            .map(str::trim)
-                            .filter(|line| !line.is_empty())
-                            .map(str::to_owned)
-                            .collect(),
-                    );
+                    let result = manager
+                        .imp()
+                        .node_filter
+                        .borrow_mut()
+                        .set_patterns(crate::node_filter::parse_patterns(&text));
+                    if let Err(invalid) = result {
+                        error_label.set_text(&invalid_patterns_message(&invalid));
+                        error_label.set_visible(true);
+                        return;
+                    }
                     manager.imp().refresh_item_visibility();
                 }
                 dialog.close();
-            }),
-        );
+            }
+        ));
         dialog.present();
     }
+}
+
+fn invalid_patterns_message(invalid: &[crate::node_filter::InvalidPattern]) -> String {
+    let mut message = String::from("These patterns are not valid regular expressions:");
+    for pattern in invalid {
+        message.push_str(&format!("\n\u{2022} {pattern}"));
+    }
+    message
 }

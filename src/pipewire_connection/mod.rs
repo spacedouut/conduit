@@ -27,7 +27,13 @@ mod registry;
 mod state;
 mod state_updates;
 
-use std::{cell::RefCell, collections::HashMap, io::Cursor, rc::Rc, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    io::Cursor,
+    rc::Rc,
+    time::Duration,
+};
 
 use adw::glib::clone;
 use log::{debug, error, info, warn};
@@ -304,22 +310,20 @@ pub(super) fn thread_main(gtk_sender: GtkSender, mut pw_receiver: PwReceiver<Gtk
             })
         });
 
-        // Once this round trip completes, every global that already existed
-        // has been announced to the registry listener below.
-        let registry_listed = match core.sync(0) {
-            Ok(seq) => Some(seq.seq()),
-            Err(error) => {
-                warn!("Could not wait for the registry listing: {error}");
-                state_updates::registry_listed(&core, &state, &virtual_devices, &gtk_sender);
-                None
-            }
-        };
-
+        let initial_sync = Rc::new(Cell::new(None));
+        let received_cookie = Cell::new(false);
         let _listener = core
             .add_listener_local()
+            .info(clone!(@strong gtk_sender => move |info| {
+                if !received_cookie.replace(true) {
+                    notify(&gtk_sender, PipewireMessage::CoreCookie { cookie: info.cookie() });
+                }
+            }))
             .done(
-                clone!(@strong core, @strong state, @strong virtual_devices, @strong gtk_sender => move |id, seq| {
-if id == PW_ID_CORE && Some(seq.seq()) == registry_listed {
+                clone!(@strong core, @strong state, @strong virtual_devices, @strong gtk_sender, @strong initial_sync => move |id, seq| {
+                    if id == PW_ID_CORE && initial_sync.get() == Some(seq) {
+                        initial_sync.set(None);
+                        notify(&gtk_sender, PipewireMessage::RegistrySynced);
                         state_updates::registry_listed(&core, &state, &virtual_devices, &gtk_sender);
                     }
                 }),
@@ -363,6 +367,13 @@ if id == PW_ID_CORE && Some(seq.seq()) == registry_listed {
             }))
             .register();
 
+        match core.sync(0) {
+            Ok(seq) => initial_sync.set(Some(seq)),
+            Err(error) => {
+                warn!("Could not sync initial PipeWire registry: {error}");
+                state_updates::registry_listed(&core, &state, &virtual_devices, &gtk_sender);
+            }
+        }
         mainloop.run();
         pw_receiver = receiver.deattach();
 

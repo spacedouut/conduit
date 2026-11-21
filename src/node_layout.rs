@@ -101,7 +101,7 @@ mod tests {
 
     #[test]
     fn node_names_round_trip() {
-        let key = "alsa_output.usb-Example Device_123-00.analog-stereo";
+        let key = "alsa_output.usb-Example Device_123-00.analog-stereo#2";
         assert_eq!(decode_key(&encode_key(key)).as_deref(), Some(key));
     }
 }

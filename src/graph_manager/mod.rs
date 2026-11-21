@@ -23,6 +23,7 @@
 mod device_manager;
 mod dialogs;
 mod link_manager;
+mod node_slots;
 mod topology;
 mod volume_manager;
 
@@ -116,6 +117,7 @@ mod imp {
             match msg {
                 PipewireMessage::NodeAdded {
                     id,
+                    serial,
                     name,
                     layout_key,
                     node_type,
@@ -125,6 +127,8 @@ mod imp {
                     id,
                     &name,
                     NodeInfo {
+                        serial,
+                        node_name: layout_key.clone(),
                         key: layout_key,
                         is_meter,
                         is_stream,
@@ -202,6 +206,38 @@ mod imp {
                 PipewireMessage::Connecting => {
                     self.obj().connection_banner().set_revealed(true);
                 }
+                PipewireMessage::CoreCookie { cookie } => {
+                    self.topology.borrow_mut().begin_enumeration(cookie);
+                }
+                PipewireMessage::RegistrySynced => {
+                    let changes = self.topology.borrow_mut().finish_enumeration();
+                    for (id, old_key, key) in &changes {
+                        log::info!("Reassigning node {id} from {old_key} to {key}");
+                        let Some(node) = self.item::<graph::Node>(*id) else {
+                            continue;
+                        };
+                        if let Some((x, y)) = self.node_layout.borrow().position(key) {
+                            self.obj()
+                                .graph()
+                                .set_node_position(&node, &Point::new(x, y));
+                        }
+                        let restore = self.volumes.borrow_mut().node_rekeyed(
+                            *id,
+                            key,
+                            &mut self.devices.borrow_mut().store,
+                        );
+                        if let Some(saved) = restore {
+                            self.send(GtkMessage::SetNodeVolume {
+                                node_id: *id,
+                                volume: saved,
+                            });
+                            node.set_remote_volume(volume_manager::slider_from_linear(saved));
+                        }
+                    }
+                    if !changes.is_empty() {
+                        self.queue_link_restore();
+                    }
+                }
                 PipewireMessage::Connected => {
                     self.obj().connection_banner().set_revealed(false);
                     self.devices.borrow_mut().connected();
@@ -274,11 +310,11 @@ mod imp {
                 }),
             );
 
+            let key = self.topology.borrow_mut().add_node(id, info);
             self.volumes
                 .borrow_mut()
-                .node_added(id, &info.key, &self.devices.borrow().store);
-            let position = self.node_layout.borrow().position(&info.key);
-            self.topology.borrow_mut().add_node(id, info);
+                .node_added(id, &key, &self.devices.borrow().store);
+            let position = self.node_layout.borrow().position(&key);
             self.items.borrow_mut().insert(id, node.clone().upcast());
 
             self.obj().graph().add_node(node.clone(), node_type);
@@ -580,7 +616,7 @@ mod imp {
                     let Some(info) = topology.node(*id) else {
                         continue;
                     };
-                    let hidden = node_filter.is_hidden(&info.key);
+                    let hidden = node_filter.is_hidden(&info.node_name);
                     node.set_visible((self.show_meters.get() || !info.is_meter) && !hidden);
                 }
             }

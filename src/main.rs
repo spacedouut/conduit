@@ -75,6 +75,7 @@ pub enum GtkMessage {
 pub enum PipewireMessage {
     NodeAdded {
         id: u32,
+        serial: Option<u64>,
         name: String,
         layout_key: String,
         node_type: Option<NodeType>,
@@ -142,6 +143,10 @@ pub enum PipewireMessage {
         message: String,
     },
     Connecting,
+    CoreCookie {
+        cookie: u32,
+    },
+    RegistrySynced,
     Connected,
     Disconnected,
 }

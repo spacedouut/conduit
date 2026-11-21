@@ -21,6 +21,7 @@ mod graph_manager;
 mod node_filter;
 mod node_layout;
 mod node_volume_store;
+mod persistence;
 mod pipewire_connection;
 mod tray;
 mod ui;

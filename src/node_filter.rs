@@ -1,5 +1,6 @@
-use adw::glib;
 use std::{fs, path::PathBuf};
+
+use crate::persistence;
 
 #[derive(Default)]
 pub struct NodeFilter {
@@ -8,7 +9,7 @@ pub struct NodeFilter {
 }
 impl NodeFilter {
     pub fn load() -> Self {
-        let path = glib::user_config_dir().join("conduit/hidden-node-patterns");
+        let path = persistence::config_path("hidden-node-patterns");
         let patterns = fs::read_to_string(&path)
             .map(|text| {
                 text.lines()
@@ -25,12 +26,10 @@ impl NodeFilter {
     }
     pub fn set_patterns(&mut self, patterns: Vec<String>) {
         self.patterns = patterns;
-        if let Some(parent) = self.path.parent() {
-            if let Err(error) = fs::create_dir_all(parent)
-                .and_then(|_| fs::write(&self.path, self.patterns.join("\n")))
-            {
-                log::warn!("Could not save hidden node patterns: {error}");
-            }
-        }
+        persistence::write_atomically(
+            &self.path,
+            &self.patterns.join("\n"),
+            "hidden node patterns",
+        );
     }
 }

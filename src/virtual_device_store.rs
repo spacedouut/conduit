@@ -2,9 +2,10 @@
 
 use std::{fs, path::Path, path::PathBuf};
 
-use adw::glib;
-
-use crate::{VirtualDeviceChannels, VirtualDeviceKind};
+use crate::{
+    persistence::{self, decode, encode, write_atomically},
+    VirtualDeviceChannels, VirtualDeviceKind,
+};
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Definition {
@@ -77,9 +78,8 @@ impl Default for Store {
 
 impl Store {
     pub fn load() -> Self {
-        let directory = glib::user_config_dir().join("conduit");
-        let devices_path = directory.join("virtual-devices");
-        let links_path = directory.join("virtual-device-links");
+        let devices_path = persistence::config_path("virtual-devices");
+        let links_path = persistence::config_path("virtual-device-links");
         Self {
             devices: read_lines(&devices_path)
                 .filter_map(|fields| parse_device(&fields))
@@ -262,44 +262,6 @@ fn parse_link(fields: &[String]) -> Option<SavedLink> {
         input_node: decode(input_node)?,
         input_port: decode(input_port)?,
     })
-}
-
-fn write_atomically(path: &Path, contents: &str, what: &str) {
-    let Some(parent) = path.parent() else {
-        return;
-    };
-    if let Err(error) = fs::create_dir_all(parent) {
-        log::warn!("Could not create config directory for {what}: {error}");
-        return;
-    }
-    let temporary_path = path.with_extension("tmp");
-    if let Err(error) =
-        fs::write(&temporary_path, contents).and_then(|_| fs::rename(&temporary_path, path))
-    {
-        log::warn!("Could not save {what}: {error}");
-        let _ = fs::remove_file(temporary_path);
-    }
-}
-
-fn encode(value: &str) -> String {
-    value
-        .as_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn decode(encoded: &str) -> Option<String> {
-    if encoded.len() % 2 != 0 {
-        return None;
-    }
-    String::from_utf8(
-        (0..encoded.len())
-            .step_by(2)
-            .map(|index| u8::from_str_radix(&encoded[index..index + 2], 16).ok())
-            .collect::<Option<Vec<_>>>()?,
-    )
-    .ok()
 }
 
 #[cfg(test)]

@@ -80,6 +80,15 @@ mod imp {
             }
         }
 
+        fn shutdown(&self) {
+            // The manager outlives the main loop, so its `Drop` can't be
+            // relied on to write changes still waiting for their save timer.
+            if let Some(graph_manager) = self.graph_manager.get() {
+                graph_manager.save_pending();
+            }
+            self.parent_shutdown();
+        }
+
         fn startup(&self) {
             self.parent_startup();
 

@@ -92,8 +92,7 @@ mod imp {
 
     impl Drop for GraphManager {
         fn drop(&mut self) {
-            self.volumes.borrow_mut().save();
-            self.comments.borrow_mut().flush();
+            self.save_pending();
         }
     }
 
@@ -108,6 +107,11 @@ mod imp {
     impl ObjectImpl for GraphManager {}
 
     impl GraphManager {
+        pub(super) fn save_pending(&self) {
+            self.volumes.borrow_mut().save();
+            self.comments.borrow_mut().flush();
+        }
+
         pub async fn receive(&self, receiver: async_channel::Receiver<crate::PipewireMessage>) {
             while let Ok(msg) = receiver.recv().await {
                 self.handle_message(msg);
@@ -785,6 +789,11 @@ impl GraphManager {
 
     fn request_remove_virtual_device(&self, id: u32) {
         self.imp().send(GtkMessage::RemoveVirtualDevice { id });
+    }
+
+    /// Write changes that are still waiting for their save timer.
+    pub fn save_pending(&self) {
+        self.imp().save_pending();
     }
 
     pub fn new(

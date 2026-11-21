@@ -12,7 +12,9 @@ use std::{
 
 use adw::glib;
 
-const MAX_LINK_DEPTH: usize = 16;
+/// The limit Linux puts on the symlinks followed while resolving a path.
+const MAX_LINK_DEPTH: usize = 40;
+const MAX_TEMPORARY_FILE_ATTEMPTS: u32 = 100;
 
 /// Path of the saved-data file `name` in Conduit's config directory.
 pub(crate) fn config_path(name: &str) -> PathBuf {
@@ -53,16 +55,11 @@ pub(crate) fn write_atomically(path: &Path, contents: &str, what: &str) -> bool 
 }
 
 fn try_write_atomically(path: &Path, contents: &str) -> io::Result<()> {
-    let path = &link_target(path);
+    let path = &link_target(path)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let temporary_path = temporary_path(path);
-    // Never write over a file this save did not create.
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary_path)?;
+    let (mut file, temporary_path) = create_temporary_file(path)?;
     let result = file
         .write_all(contents.as_bytes())
         .and_then(|_| fs::rename(&temporary_path, path));
@@ -75,25 +72,45 @@ fn try_write_atomically(path: &Path, contents: &str) -> io::Result<()> {
 /// The file a save of `path` has to replace: `path` itself, or the file it
 /// links to, so that a symlinked store keeps its link. The target may not
 /// exist yet.
-fn link_target(path: &Path) -> PathBuf {
+fn link_target(path: &Path) -> io::Result<PathBuf> {
     let mut path = path.to_path_buf();
     for _ in 0..MAX_LINK_DEPTH {
         let Ok(target) = fs::read_link(&path) else {
-            break;
+            return Ok(path);
         };
         path = match path.parent() {
             Some(parent) => parent.join(target),
             None => target,
         };
     }
-    path
+    Err(io::Error::other("too many levels of symbolic links"))
 }
 
-/// Where the new contents of `path` are written before replacing it. The name
-/// is specific to this process so it cannot belong to anything else.
-pub(crate) fn temporary_path(path: &Path) -> PathBuf {
+/// Create the file the new contents of `path` are written to before it
+/// replaces `path`. Existing files are never reused, so a save cannot write
+/// over something it did not create, and a file left behind by an interrupted
+/// save does not block later ones.
+fn create_temporary_file(path: &Path) -> io::Result<(fs::File, PathBuf)> {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
-    path.with_file_name(format!(".{name}.{}.tmp", std::process::id()))
+    let mut attempt = 0;
+    loop {
+        let temporary_path =
+            path.with_file_name(format!(".{name}.{}-{attempt}.tmp", std::process::id()));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)
+        {
+            Ok(file) => return Ok((file, temporary_path)),
+            Err(error)
+                if error.kind() == io::ErrorKind::AlreadyExists
+                    && attempt < MAX_TEMPORARY_FILE_ATTEMPTS =>
+            {
+                attempt += 1
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// A fresh directory for a test's files.
@@ -134,7 +151,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "one\n");
         write_atomically(&path, "two\n", "test");
         assert_eq!(fs::read_to_string(&path).unwrap(), "two\n");
-        assert!(!temporary_path(&path).exists());
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
         let _ = fs::remove_dir_all(directory);
     }
 
@@ -183,14 +200,42 @@ mod tests {
     }
 
     #[test]
-    fn failed_write_keeps_previous_file() {
+    fn leftover_temporary_file_does_not_block_saves() {
+        let directory = test_directory("leftover");
+        let path = directory.join("store");
+        let (_, leftover) = create_temporary_file(&path).unwrap();
+        fs::write(&leftover, "stale\n").unwrap();
+
+        assert!(write_atomically(&path, "new\n", "test"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new\n");
+        assert_eq!(fs::read_to_string(&leftover).unwrap(), "stale\n");
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_loop_fails_without_replacing_the_link() {
+        let directory = test_directory("symlink-loop");
+        let link = directory.join("store");
+        std::os::unix::fs::symlink("store", &link).unwrap();
+
+        assert!(!write_atomically(&link, "lost\n", "test"));
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn failed_write_cleans_up_and_keeps_destination() {
         let directory = test_directory("failed-write");
         let path = directory.join("store");
-        assert!(write_atomically(&path, "kept\n", "test"));
-        // A directory in the temporary file's place makes the write fail.
-        fs::create_dir(temporary_path(&path)).unwrap();
+        // A non-empty directory can't be replaced, so the final rename fails.
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("kept"), "kept\n").unwrap();
+
         assert!(!write_atomically(&path, "lost\n", "test"));
-        assert_eq!(fs::read_to_string(&path).unwrap(), "kept\n");
+        assert_eq!(fs::read_to_string(path.join("kept")).unwrap(), "kept\n");
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
         let _ = fs::remove_dir_all(directory);
     }
 }

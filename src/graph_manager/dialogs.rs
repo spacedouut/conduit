@@ -29,7 +29,7 @@ impl GraphManager {
             .build();
 
         let introduction = gtk::Label::new(Some(
-            "Create a routable endpoint. Conduit recreates it, with its volume and connections, every time it starts.",
+            "Create a routable endpoint. It keeps working after Conduit quits, and Conduit sets it up again, with its volume and connections, every time it starts.",
         ));
         introduction.set_xalign(0.0);
         introduction.set_wrap(true);

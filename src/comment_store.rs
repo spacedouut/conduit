@@ -206,12 +206,12 @@ mod tests {
         let mut store = CommentStore::load_from(directory.join("comments"));
         let id = store.add(0.0, 0.0);
         // A directory in the temporary file's place makes the write fail.
-        fs::create_dir(store.path.with_extension("tmp")).unwrap();
+        fs::create_dir(persistence::temporary_path(&store.path)).unwrap();
         store.set_text(id, "hey");
         store.flush();
         assert!(store.needs_save());
 
-        fs::remove_dir(store.path.with_extension("tmp")).unwrap();
+        fs::remove_dir(persistence::temporary_path(&store.path)).unwrap();
         store.flush();
         assert!(!store.needs_save());
         assert_eq!(saved(&store), "0\t0\t0\t686579\n");

@@ -5,11 +5,14 @@
 //! Helpers shared by the stores that keep user state in the config directory.
 
 use std::{
-    fs, io,
+    fs,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
 use adw::glib;
+
+const MAX_LINK_DEPTH: usize = 16;
 
 /// Path of the saved-data file `name` in Conduit's config directory.
 pub(crate) fn config_path(name: &str) -> PathBuf {
@@ -50,19 +53,47 @@ pub(crate) fn write_atomically(path: &Path, contents: &str, what: &str) -> bool 
 }
 
 fn try_write_atomically(path: &Path, contents: &str) -> io::Result<()> {
-    // Write through a symlinked file instead of replacing the link.
-    let target = fs::canonicalize(path);
-    let path = target.as_deref().unwrap_or(path);
+    let path = &link_target(path);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let temporary_path = path.with_extension("tmp");
-    let result =
-        fs::write(&temporary_path, contents).and_then(|_| fs::rename(&temporary_path, path));
+    let temporary_path = temporary_path(path);
+    // Never write over a file this save did not create.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary_path)?;
+    let result = file
+        .write_all(contents.as_bytes())
+        .and_then(|_| fs::rename(&temporary_path, path));
     if result.is_err() {
         let _ = fs::remove_file(temporary_path);
     }
     result
+}
+
+/// The file a save of `path` has to replace: `path` itself, or the file it
+/// links to, so that a symlinked store keeps its link. The target may not
+/// exist yet.
+fn link_target(path: &Path) -> PathBuf {
+    let mut path = path.to_path_buf();
+    for _ in 0..MAX_LINK_DEPTH {
+        let Ok(target) = fs::read_link(&path) else {
+            break;
+        };
+        path = match path.parent() {
+            Some(parent) => parent.join(target),
+            None => target,
+        };
+    }
+    path
+}
+
+/// Where the new contents of `path` are written before replacing it. The name
+/// is specific to this process so it cannot belong to anything else.
+pub(crate) fn temporary_path(path: &Path) -> PathBuf {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    path.with_file_name(format!(".{name}.{}.tmp", std::process::id()))
 }
 
 /// A fresh directory for a test's files.
@@ -103,7 +134,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "one\n");
         write_atomically(&path, "two\n", "test");
         assert_eq!(fs::read_to_string(&path).unwrap(), "two\n");
-        assert!(!path.with_extension("tmp").exists());
+        assert!(!temporary_path(&path).exists());
         let _ = fs::remove_dir_all(directory);
     }
 
@@ -122,13 +153,42 @@ mod tests {
         let _ = fs::remove_dir_all(directory);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn write_creates_missing_symlink_target() {
+        let directory = test_directory("dangling-symlink");
+        let target = directory.join("dotfiles/store");
+        let link = directory.join("store");
+        std::os::unix::fs::symlink("dotfiles/store", &link).unwrap();
+
+        assert!(write_atomically(&link, "one\n", "test"));
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "one\n");
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn write_leaves_neighbouring_files_alone() {
+        let directory = test_directory("neighbours");
+        let path = directory.join("store");
+        fs::write(directory.join("store.tmp"), "theirs\n").unwrap();
+
+        assert!(write_atomically(&path, "ours\n", "test"));
+        assert_eq!(
+            fs::read_to_string(directory.join("store.tmp")).unwrap(),
+            "theirs\n"
+        );
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 2);
+        let _ = fs::remove_dir_all(directory);
+    }
+
     #[test]
     fn failed_write_keeps_previous_file() {
         let directory = test_directory("failed-write");
         let path = directory.join("store");
         assert!(write_atomically(&path, "kept\n", "test"));
         // A directory in the temporary file's place makes the write fail.
-        fs::create_dir(path.with_extension("tmp")).unwrap();
+        fs::create_dir(temporary_path(&path)).unwrap();
         assert!(!write_atomically(&path, "lost\n", "test"));
         assert_eq!(fs::read_to_string(&path).unwrap(), "kept\n");
         let _ = fs::remove_dir_all(directory);

@@ -4,9 +4,7 @@
 
 use std::{fs, path::PathBuf};
 
-use adw::glib;
-
-use crate::node_layout::{decode_key, encode_key};
+use crate::persistence::{self, decode as decode_key, encode as encode_key};
 
 /// A text note placed on the graph.
 pub struct Comment {
@@ -20,15 +18,24 @@ pub struct Comment {
 pub struct CommentStore {
     comments: Vec<Comment>,
     path: PathBuf,
+    /// Text was edited since the last save.
+    dirty: bool,
 }
 
 impl CommentStore {
     pub fn load() -> Self {
-        let path = glib::user_config_dir().join("conduit/comments");
+        Self::load_from(persistence::config_path("comments"))
+    }
+
+    fn load_from(path: PathBuf) -> Self {
         let comments = fs::read_to_string(&path)
             .map(|contents| contents.lines().filter_map(parse_comment).collect())
             .unwrap_or_default();
-        Self { comments, path }
+        Self {
+            comments,
+            path,
+            dirty: false,
+        }
     }
 
     pub fn comments(&self) -> &[Comment] {
@@ -52,9 +59,24 @@ impl CommentStore {
         id
     }
 
+    /// Change a comment's text. The file is not written until [`Self::flush`],
+    /// so typing does not rewrite it for every keystroke.
     pub fn set_text(&mut self, id: u32, text: &str) {
         if let Some(comment) = self.comments.iter_mut().find(|comment| comment.id == id) {
-            comment.text = text.to_owned();
+            if comment.text != text {
+                comment.text = text.to_owned();
+                self.dirty = true;
+            }
+        }
+    }
+
+    pub fn needs_save(&self) -> bool {
+        self.dirty
+    }
+
+    /// Write text edits that have not been saved yet.
+    pub fn flush(&mut self) {
+        if self.dirty {
             self.save();
         }
     }
@@ -72,35 +94,26 @@ impl CommentStore {
         self.save();
     }
 
-    fn save(&self) {
-        let Some(parent) = self.path.parent() else {
-            return;
-        };
-        if let Err(error) = fs::create_dir_all(parent) {
-            log::warn!("Could not create comments directory: {error}");
-            return;
-        }
-        let contents: String = self
-            .comments
-            .iter()
-            .map(|comment| {
-                format!(
-                    "{}\t{}\t{}\t{}\n",
-                    comment.id,
-                    comment.x,
-                    comment.y,
-                    encode_key(&comment.text)
-                )
-            })
-            .collect();
-        let temporary_path = self.path.with_extension("tmp");
-        if let Err(error) = fs::write(&temporary_path, contents)
-            .and_then(|_| fs::rename(&temporary_path, &self.path))
-        {
-            log::warn!("Could not save comments: {error}");
-            let _ = fs::remove_file(temporary_path);
-        }
+    fn save(&mut self) {
+        // A failed write stays dirty so a later flush retries it.
+        self.dirty =
+            !persistence::write_atomically(&self.path, &serialize(&self.comments), "comments");
     }
+}
+
+fn serialize(comments: &[Comment]) -> String {
+    comments
+        .iter()
+        .map(|comment| {
+            format!(
+                "{}\t{}\t{}\t{}\n",
+                comment.id,
+                comment.x,
+                comment.y,
+                encode_key(&comment.text)
+            )
+        })
+        .collect()
 }
 
 fn parse_comment(line: &str) -> Option<Comment> {
@@ -115,7 +128,11 @@ fn parse_comment(line: &str) -> Option<Comment> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_comment;
+    use super::*;
+
+    fn saved(store: &CommentStore) -> String {
+        fs::read_to_string(&store.path).unwrap_or_default()
+    }
 
     #[test]
     fn parses_saved_comment() {
@@ -123,5 +140,94 @@ mod tests {
         assert_eq!(comment.id, 3);
         assert_eq!((comment.x, comment.y), (-12.5, 40.0));
         assert_eq!(comment.text, "hi\nthere");
+    }
+
+    #[test]
+    fn serializes_in_the_saved_format() {
+        let comments = [
+            Comment {
+                id: 3,
+                x: -12.5,
+                y: 40.0,
+                text: "hi\nthere".into(),
+            },
+            Comment {
+                id: 4,
+                x: 0.0,
+                y: 1.25,
+                text: String::new(),
+            },
+        ];
+        assert_eq!(
+            serialize(&comments),
+            "3\t-12.5\t40\t68690a7468657265\n4\t0\t1.25\t\n"
+        );
+    }
+
+    #[test]
+    fn typing_does_not_write_until_flushed() {
+        let directory = persistence::test_directory("comment-typing");
+        let mut store = CommentStore::load_from(directory.join("comments"));
+        let id = store.add(1.0, 2.0);
+        let before = saved(&store);
+        assert_eq!(before, "0\t1\t2\t\n");
+
+        for text in ["h", "he", "hey"] {
+            store.set_text(id, text);
+            assert_eq!(saved(&store), before);
+        }
+        assert!(store.needs_save());
+
+        store.flush();
+        assert!(!store.needs_save());
+        assert_eq!(saved(&store), "0\t1\t2\t686579\n");
+
+        let reloaded = CommentStore::load_from(store.path.clone());
+        assert_eq!(reloaded.comments()[0].text, "hey");
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn unchanged_text_and_clean_flush_do_not_write() {
+        let directory = persistence::test_directory("comment-clean");
+        let mut store = CommentStore::load_from(directory.join("comments"));
+        let id = store.add(0.0, 0.0);
+        store.set_text(id, "");
+        assert!(!store.needs_save());
+        fs::remove_file(&store.path).unwrap();
+        store.flush();
+        assert!(!store.path.exists());
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn failed_save_is_retried() {
+        let directory = persistence::test_directory("comment-retry");
+        let mut store = CommentStore::load_from(directory.join("comments"));
+        let id = store.add(0.0, 0.0);
+        // A directory in the file's place makes the write fail.
+        fs::remove_file(&store.path).unwrap();
+        fs::create_dir(&store.path).unwrap();
+        store.set_text(id, "hey");
+        store.flush();
+        assert!(store.needs_save());
+
+        fs::remove_dir(&store.path).unwrap();
+        store.flush();
+        assert!(!store.needs_save());
+        assert_eq!(saved(&store), "0\t0\t0\t686579\n");
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn other_changes_save_pending_text() {
+        let directory = persistence::test_directory("comment-pending");
+        let mut store = CommentStore::load_from(directory.join("comments"));
+        let id = store.add(0.0, 0.0);
+        store.set_text(id, "hey");
+        store.set_position(id, 5.0, 6.0);
+        assert!(!store.needs_save());
+        assert_eq!(saved(&store), "0\t5\t6\t686579\n");
+        let _ = fs::remove_dir_all(directory);
     }
 }

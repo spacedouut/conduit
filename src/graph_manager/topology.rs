@@ -23,14 +23,6 @@ pub(super) struct NodeInfo {
     pub is_stream: bool,
 }
 
-impl NodeInfo {
-    pub fn matches_hidden_patterns(&self, patterns: &[regex::Regex]) -> bool {
-        patterns
-            .iter()
-            .any(|pattern| pattern.is_match(&self.node_name))
-    }
-}
-
 /// What the GTK thread knows about the PipeWire nodes and ports on screen.
 #[derive(Default)]
 pub(super) struct Topology {
@@ -159,17 +151,12 @@ mod tests {
     }
 
     #[test]
-    fn filters_match_original_names_for_duplicate_streams() {
+    fn duplicate_streams_keep_original_name_for_filters() {
         let mut topology = Topology::default();
         add(&mut topology, 1, "Firefox");
         add(&mut topology, 2, "Firefox");
-        let patterns = [regex::Regex::new("^Firefox$").unwrap()];
         for id in [1, 2] {
-            let node = topology.node(id).unwrap();
-            assert_eq!(node.node_name, "Firefox");
-            assert!(node.matches_hidden_patterns(&patterns));
-            assert!(!node.matches_hidden_patterns(&[]));
-            assert!(!node.matches_hidden_patterns(&[regex::Regex::new("^Firefox#2$").unwrap()]));
+            assert_eq!(topology.node(id).unwrap().node_name, "Firefox");
         }
     }
 }

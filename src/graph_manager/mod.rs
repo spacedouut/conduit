@@ -574,20 +574,14 @@ mod imp {
         pub(super) fn refresh_item_visibility(&self) {
             let topology = self.topology.borrow();
             let items = self.items.borrow();
-            let hidden_patterns: Vec<_> = self
-                .node_filter
-                .borrow()
-                .patterns()
-                .iter()
-                .filter_map(|pattern| regex::Regex::new(pattern).ok())
-                .collect();
+            let node_filter = self.node_filter.borrow();
 
             for (id, item) in items.iter() {
                 if let Some(node) = item.dynamic_cast_ref::<graph::Node>() {
                     let Some(info) = topology.node(*id) else {
                         continue;
                     };
-                    let hidden = info.matches_hidden_patterns(&hidden_patterns);
+                    let hidden = node_filter.is_hidden(&info.node_name);
                     node.set_visible((self.show_meters.get() || !info.is_meter) && !hidden);
                 }
             }
@@ -820,6 +814,12 @@ impl GraphManager {
         res.set_show_monitor_ports(window.show_monitor_ports_button().is_active());
         res.imp().show_meters.set(true);
         res.imp().show_volume_sliders.set(show_volume_sliders);
+
+        if !res.imp().node_filter.borrow().invalid_patterns().is_empty() {
+            glib::idle_add_local_once(glib::clone!(@weak res => move || {
+                res.show_invalid_node_filter_warning();
+            }));
+        }
 
         res
     }

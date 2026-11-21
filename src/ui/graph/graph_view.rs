@@ -26,7 +26,7 @@ use adw::{
     subclass::prelude::*,
 };
 
-use super::{placement, Link, Node, Port};
+use super::{link_curve::LinkCurve, placement, Link, Node, Port};
 use crate::NodeType;
 
 const CANVAS_SIZE: f64 = 5000.0;
@@ -269,6 +269,13 @@ mod imp {
     }
 
     impl ScrollableImpl for GraphView {}
+
+    fn link_curve(output_anchor: &Point, input_anchor: &Point) -> LinkCurve {
+        LinkCurve::new(
+            (output_anchor.x().into(), output_anchor.y().into()),
+            (input_anchor.x().into(), input_anchor.y().into()),
+        )
+    }
 
     impl GraphView {
         /// Returns a [`gsk::Transform`] matrix that can translate from canvas space to screen space.
@@ -751,16 +758,10 @@ mod imp {
         fn draw_link(
             &self,
             link_cr: &cairo::Context,
-            output_anchor: &Point,
-            input_anchor: &Point,
+            curve: &LinkCurve,
             active: bool,
             color: &gdk::RGBA,
         ) {
-            let output_x: f64 = output_anchor.x().into();
-            let output_y: f64 = output_anchor.y().into();
-            let input_x: f64 = input_anchor.x().into();
-            let input_y: f64 = input_anchor.y().into();
-
             // Use dashed line for inactive links, full line otherwise.
             if active {
                 link_cr.set_dash(&[], 0.0);
@@ -775,27 +776,14 @@ mod imp {
                 color.alpha().into(),
             );
 
-            // If the output port is farther right than the input port and they have
-            // a similar y coordinate, apply a y offset to the control points
-            // so that the curve sticks out a bit.
-            let y_control_offset = if output_x > input_x {
-                f64::max(0.0, 25.0 - (output_y - input_y).abs())
-            } else {
-                0.0
-            };
-
-            // Place curve control offset by half the x distance between the two points.
-            // This makes the curve scale well for varying distances between the two ports,
-            // especially when the output port is farther right than the input port.
-            let half_x_dist = f64::abs(output_x - input_x) / 2.0;
-            link_cr.move_to(output_x, output_y);
+            link_cr.move_to(curve.start.0, curve.start.1);
             link_cr.curve_to(
-                output_x + half_x_dist,
-                output_y - y_control_offset,
-                input_x - half_x_dist,
-                input_y - y_control_offset,
-                input_x,
-                input_y,
+                curve.control1.0,
+                curve.control1.1,
+                curve.control2.0,
+                curve.control2.1,
+                curve.end.0,
+                curve.end.1,
             );
 
             if let Err(e) = link_cr.stroke() {
@@ -833,7 +821,8 @@ mod imp {
 
             let color = &colors.color_for_media_type(MediaType::from_raw(port.media_type()));
 
-            self.draw_link(link_cr, output_anchor, input_anchor, false, color);
+            let curve = link_curve(output_anchor, input_anchor);
+            self.draw_link(link_cr, &curve, false, color);
         }
 
         fn snapshot_links(&self, widget: &super::GraphView, snapshot: &gtk::Snapshot) {
@@ -846,7 +835,8 @@ mod imp {
                 alloc.height() as f32,
             ));
 
-            link_cr.set_line_width(2.0 * self.zoom_factor.get());
+            let line_width = 2.0 * self.zoom_factor.get();
+            link_cr.set_line_width(line_width);
 
             let lookup_color = |name: &str| {
                 widget
@@ -867,19 +857,17 @@ mod imp {
             for link in self.links.borrow().iter().filter(|link| link.visible()) {
                 let color = &colors.color_for_media_type(link.media_type());
 
-                // TODO: Do not draw links when they are outside the view
                 let Some((output_anchor, input_anchor)) = self.get_link_coordinates(link) else {
                     warn!("Could not get allocation of ports of link: {:?}", link);
                     continue;
                 };
 
-                self.draw_link(
-                    &link_cr,
-                    &output_anchor,
-                    &input_anchor,
-                    link.active(),
-                    color,
-                );
+                let curve = link_curve(&output_anchor, &input_anchor);
+                if !curve.may_be_visible(line_width, alloc.width().into(), alloc.height().into()) {
+                    continue;
+                }
+
+                self.draw_link(&link_cr, &curve, link.active(), color);
             }
 
             if let Some(port) = self.dragged_port.upgrade() {

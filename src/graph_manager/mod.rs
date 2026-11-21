@@ -23,6 +23,7 @@
 mod device_manager;
 mod dialogs;
 mod link_manager;
+mod node_slots;
 mod topology;
 mod volume_manager;
 
@@ -116,6 +117,7 @@ mod imp {
             match msg {
                 PipewireMessage::NodeAdded {
                     id,
+                    serial,
                     name,
                     layout_key,
                     node_type,
@@ -125,6 +127,7 @@ mod imp {
                     id,
                     &name,
                     NodeInfo {
+                        serial,
                         node_name: layout_key.clone(),
                         key: layout_key,
                         is_meter,
@@ -202,6 +205,12 @@ mod imp {
                 }
                 PipewireMessage::Connecting => {
                     self.obj().connection_banner().set_revealed(true);
+                }
+                PipewireMessage::CoreCookie { cookie } => {
+                    self.topology.borrow_mut().begin_enumeration(cookie);
+                }
+                PipewireMessage::RegistrySynced => {
+                    self.topology.borrow_mut().finish_enumeration();
                 }
                 PipewireMessage::Connected => {
                     self.obj().connection_banner().set_revealed(false);

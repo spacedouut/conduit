@@ -4,6 +4,8 @@ use std::collections::HashMap;
 
 use pipewire::spa::utils::Direction;
 
+use super::node_slots::NodeSlots;
+
 #[derive(Clone)]
 pub(super) struct PortInfo {
     pub node_id: u32,
@@ -15,6 +17,7 @@ pub(super) struct PortInfo {
 
 #[derive(Clone)]
 pub(super) struct NodeInfo {
+    pub serial: Option<u64>,
     pub node_name: String,
     /// Live-unique `node.name`, used to remember layout, volume and links.
     pub key: String,
@@ -28,27 +31,63 @@ pub(super) struct NodeInfo {
 pub(super) struct Topology {
     nodes: HashMap<u32, NodeInfo>,
     ports: HashMap<u32, PortInfo>,
+    slots: NodeSlots,
+    enumerating: bool,
 }
 
 impl Topology {
+    pub fn begin_enumeration(&mut self, cookie: u32) {
+        self.slots = NodeSlots::load(cookie);
+        self.enumerating = true;
+    }
+
+    pub fn finish_enumeration(&mut self) {
+        self.enumerating = false;
+        self.slots
+            .entries
+            .retain(|serial, _| self.nodes.values().any(|node| node.serial == Some(*serial)));
+        self.slots.save();
+    }
+
     pub fn add_node(&mut self, id: u32, mut info: NodeInfo) -> String {
         let base = info.key.clone();
-        let mut suffix = 2;
-        while self
-            .nodes
-            .iter()
-            .any(|(node_id, node)| *node_id != id && node.key == info.key)
+        let occupied =
+            |key: &str| {
+                self.nodes
+                    .iter()
+                    .any(|(node_id, node)| *node_id != id && node.key == key)
+                    || (self.enumerating
+                        && self.slots.entries.iter().any(|(serial, (_, saved))| {
+                            Some(*serial) != info.serial && saved == key
+                        }))
+            };
+        if let Some((saved_base, key)) = info
+            .serial
+            .and_then(|serial| self.slots.entries.get(&serial))
         {
+            if saved_base == &base && !occupied(key) {
+                info.key = key.clone();
+            }
+        }
+        let mut suffix = 2;
+        while occupied(&info.key) {
             info.key = format!("{base}#{suffix}");
             suffix += 1;
         }
         let key = info.key.clone();
+        if let Some(serial) = info.serial {
+            self.slots.entries.insert(serial, (base, key.clone()));
+            self.slots.save();
+        }
         self.nodes.insert(id, info);
         key
     }
 
     pub fn remove_node(&mut self, id: u32) {
-        self.nodes.remove(&id);
+        if let Some(serial) = self.nodes.remove(&id).and_then(|node| node.serial) {
+            self.slots.entries.remove(&serial);
+            self.slots.save();
+        }
         self.ports.retain(|_, port| port.node_id != id);
     }
 
@@ -97,6 +136,7 @@ mod tests {
         topology.add_node(
             id,
             NodeInfo {
+                serial: Some(u64::from(id)),
                 node_name: key.to_string(),
                 key: key.to_string(),
                 is_meter: false,
@@ -158,5 +198,50 @@ mod tests {
         for id in [1, 2] {
             assert_eq!(topology.node(id).unwrap().node_name, "Firefox");
         }
+    }
+
+    #[test]
+    fn survivor_keeps_slot_across_restart() {
+        let mut before = Topology::default();
+        add(&mut before, 1, "Firefox");
+        add(&mut before, 2, "Firefox");
+        before.remove_node(1);
+        let mut after = Topology {
+            slots: before.slots,
+            enumerating: true,
+            ..Topology::default()
+        };
+        assert_eq!(add(&mut after, 2, "Firefox"), "Firefox#2");
+        after.finish_enumeration();
+        assert_eq!(add(&mut after, 3, "Firefox"), "Firefox");
+    }
+
+    #[test]
+    fn enumeration_reserves_slots_then_releases_absent_serials() {
+        let mut topology = Topology::default();
+        add(&mut topology, 1, "Firefox");
+        add(&mut topology, 2, "Firefox");
+        topology.clear();
+        topology.enumerating = true;
+        assert_eq!(add(&mut topology, 3, "Firefox"), "Firefox#3");
+        assert_eq!(add(&mut topology, 2, "Firefox"), "Firefox#2");
+        topology.finish_enumeration();
+        assert!(!topology.slots.entries.contains_key(&1));
+        assert_eq!(add(&mut topology, 4, "Firefox"), "Firefox");
+    }
+
+    #[test]
+    fn remembered_slot_requires_matching_base_and_free_key() {
+        let mut topology = Topology::default();
+        topology
+            .slots
+            .entries
+            .insert(1, ("Other".into(), "Other#2".into()));
+        assert_eq!(add(&mut topology, 1, "Firefox"), "Firefox");
+        topology
+            .slots
+            .entries
+            .insert(2, ("Firefox".into(), "Firefox".into()));
+        assert_eq!(add(&mut topology, 2, "Firefox"), "Firefox#2");
     }
 }

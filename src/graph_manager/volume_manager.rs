@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::{node_volume_store::NodeVolumeStore, virtual_device_store::Store};
 
@@ -21,6 +21,7 @@ pub(super) fn linear_from_slider(value: f64) -> f32 {
 pub(super) struct VolumeManager {
     /// Nodes whose first reported volume should be replaced by a saved one.
     pending_restores: HashSet<u32>,
+    reported_volumes: HashMap<u32, f32>,
     saved: NodeVolumeStore,
     /// Whether `saved` changed since it was last written.
     dirty: bool,
@@ -30,6 +31,7 @@ impl Default for VolumeManager {
     fn default() -> Self {
         Self {
             pending_restores: HashSet::new(),
+            reported_volumes: HashMap::new(),
             saved: NodeVolumeStore::load(),
             dirty: false,
         }
@@ -55,6 +57,13 @@ impl VolumeManager {
         }
     }
 
+    pub fn node_rekeyed(&mut self, id: u32, key: &str, devices: &mut Store) -> Option<f32> {
+        self.pending_restores.remove(&id);
+        self.node_added(id, key, devices);
+        let volume = self.reported_volumes.get(&id).copied()?;
+        self.remote_volume_changed(id, key, volume, devices)
+    }
+
     /// The user moved a volume slider.
     pub fn user_set_volume(&mut self, id: u32, key: &str, volume: f32, devices: &mut Store) {
         // The user's choice wins over a restore that hasn't happened yet.
@@ -71,6 +80,7 @@ impl VolumeManager {
         volume: f32,
         devices: &mut Store,
     ) -> Option<f32> {
+        self.reported_volumes.insert(id, volume);
         if self.pending_restores.remove(&id) {
             if let Some(saved) = self
                 .saved_volume(key, devices)
@@ -102,16 +112,70 @@ impl VolumeManager {
 
     pub fn node_removed(&mut self, id: u32) {
         self.pending_restores.remove(&id);
+        self.reported_volumes.remove(&id);
     }
 
     pub fn clear(&mut self) {
         self.pending_restores.clear();
+        self.reported_volumes.clear();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn manager() -> VolumeManager {
+        VolumeManager {
+            pending_restores: HashSet::new(),
+            reported_volumes: HashMap::new(),
+            saved: NodeVolumeStore::default(),
+            dirty: false,
+        }
+    }
+
+    #[test]
+    fn rekey_before_first_report_preserves_unity_restore() {
+        let mut manager = manager();
+        let mut devices = Store::default();
+        manager.saved.set_volume("TestApp", 1.0);
+        manager.node_added(1, "TestApp#3", &devices);
+        assert_eq!(manager.node_rekeyed(1, "TestApp", &mut devices), None);
+        assert!(manager.pending_restores.contains(&1));
+        assert_eq!(
+            manager.remote_volume_changed(1, "TestApp", 0.25, &mut devices),
+            Some(1.0)
+        );
+        assert_eq!(manager.saved.volume("TestApp"), Some(1.0));
+    }
+
+    #[test]
+    fn rekey_after_report_restores_using_reported_volume() {
+        let mut manager = manager();
+        let mut devices = Store::default();
+        manager.saved.set_volume("TestApp", 1.0);
+        assert_eq!(
+            manager.remote_volume_changed(1, "TestApp#3", 0.25, &mut devices),
+            None
+        );
+        assert_eq!(manager.node_rekeyed(1, "TestApp", &mut devices), Some(1.0));
+        manager.node_removed(1);
+        assert_eq!(manager.node_rekeyed(1, "TestApp", &mut devices), None);
+        assert!(manager.pending_restores.contains(&1));
+        manager.clear();
+        assert!(manager.reported_volumes.is_empty());
+        assert!(manager.pending_restores.is_empty());
+    }
+
+    #[test]
+    fn rekey_without_saved_volume_does_not_restore() {
+        let mut manager = manager();
+        let mut devices = Store::default();
+        manager.remote_volume_changed(1, "TestApp#3", 0.25, &mut devices);
+        assert_eq!(manager.node_rekeyed(1, "TestApp", &mut devices), None);
+        assert!(!manager.pending_restores.contains(&1));
+        assert_eq!(manager.saved.volume("TestApp"), None);
+    }
 
     #[test]
     fn slider_scale_round_trips() {

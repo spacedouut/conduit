@@ -221,15 +221,18 @@ mod imp {
                                 .graph()
                                 .set_node_position(&node, &Point::new(x, y));
                         }
-                        self.volumes.borrow_mut().node_removed(*id);
-                        self.volumes.borrow_mut().node_added(
+                        let restore = self.volumes.borrow_mut().node_rekeyed(
                             *id,
                             key,
-                            &self.devices.borrow().store,
+                            &mut self.devices.borrow_mut().store,
                         );
-                        let volume =
-                            volume_manager::linear_from_slider(node.volume_scale().value());
-                        self.node_volume_changed(*id, volume);
+                        if let Some(saved) = restore {
+                            self.send(GtkMessage::SetNodeVolume {
+                                node_id: *id,
+                                volume: saved,
+                            });
+                            node.set_remote_volume(volume_manager::slider_from_linear(saved));
+                        }
                     }
                     if !changes.is_empty() {
                         self.queue_link_restore();

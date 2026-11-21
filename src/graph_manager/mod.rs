@@ -734,7 +734,15 @@ impl GraphManager {
             }),
         );
         window.edit_node_filters_button().connect_clicked(
-            glib::clone!(@weak self as manager => move |_| manager.show_node_filter_dialog()),
+            glib::clone!(@weak self as manager => move |button| {
+                if let Some(popover) = button
+                    .ancestor(adw::gtk::Popover::static_type())
+                    .and_downcast::<adw::gtk::Popover>()
+                {
+                    popover.popdown();
+                }
+                manager.show_node_filter_dialog();
+            }),
         );
     }
 

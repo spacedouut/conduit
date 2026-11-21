@@ -210,7 +210,30 @@ mod imp {
                     self.topology.borrow_mut().begin_enumeration(cookie);
                 }
                 PipewireMessage::RegistrySynced => {
-                    self.topology.borrow_mut().finish_enumeration();
+                    let changes = self.topology.borrow_mut().finish_enumeration();
+                    for (id, old_key, key) in &changes {
+                        log::info!("Reassigning node {id} from {old_key} to {key}");
+                        let Some(node) = self.item::<graph::Node>(*id) else {
+                            continue;
+                        };
+                        if let Some((x, y)) = self.node_layout.borrow().position(key) {
+                            self.obj()
+                                .graph()
+                                .set_node_position(&node, &Point::new(x, y));
+                        }
+                        self.volumes.borrow_mut().node_removed(*id);
+                        self.volumes.borrow_mut().node_added(
+                            *id,
+                            key,
+                            &self.devices.borrow().store,
+                        );
+                        let volume =
+                            volume_manager::linear_from_slider(node.volume_scale().value());
+                        self.node_volume_changed(*id, volume);
+                    }
+                    if !changes.is_empty() {
+                        self.queue_link_restore();
+                    }
                 }
                 PipewireMessage::Connected => {
                     self.obj().connection_banner().set_revealed(false);

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use pipewire::spa::utils::Direction;
 
@@ -33,6 +33,7 @@ pub(super) struct Topology {
     ports: HashMap<u32, PortInfo>,
     slots: NodeSlots,
     enumerating: bool,
+    reservation_displaced: HashSet<u32>,
 }
 
 impl Topology {
@@ -41,12 +42,46 @@ impl Topology {
         self.enumerating = true;
     }
 
-    pub fn finish_enumeration(&mut self) {
+    pub fn finish_enumeration(&mut self) -> Vec<(u32, String, String)> {
         self.enumerating = false;
         self.slots
             .entries
             .retain(|serial, _| self.nodes.values().any(|node| node.serial == Some(*serial)));
+        let mut displaced: Vec<_> = self.reservation_displaced.drain().collect();
+        displaced.sort_unstable_by_key(|id| (self.nodes.get(id).and_then(|node| node.serial), *id));
+        let mut occupied: HashSet<_> = self
+            .nodes
+            .iter()
+            .filter(|(id, _)| !displaced.contains(id))
+            .map(|(_, node)| node.key.clone())
+            .collect();
+        let mut changes = Vec::new();
+        for id in displaced {
+            let Some(node) = self.nodes.get_mut(&id) else {
+                continue;
+            };
+            let mut key = node.node_name.clone();
+            let mut suffix = 2;
+            while occupied.contains(&key) {
+                key = format!("{}#{suffix}", node.node_name);
+                suffix += 1;
+            }
+            occupied.insert(key.clone());
+            if key != node.key {
+                changes.push((
+                    id,
+                    std::mem::replace(&mut node.key, key.clone()),
+                    key.clone(),
+                ));
+                if let Some(serial) = node.serial {
+                    self.slots
+                        .entries
+                        .insert(serial, (node.node_name.clone(), key));
+                }
+            }
+        }
         self.slots.save();
+        changes
     }
 
     pub fn add_node(&mut self, id: u32, mut info: NodeInfo) -> String {
@@ -70,9 +105,20 @@ impl Topology {
             }
         }
         let mut suffix = 2;
+        let mut displaced = false;
         while occupied(&info.key) {
+            if !self
+                .nodes
+                .iter()
+                .any(|(node_id, node)| *node_id != id && node.key == info.key)
+            {
+                displaced = true;
+            }
             info.key = format!("{base}#{suffix}");
             suffix += 1;
+        }
+        if displaced {
+            self.reservation_displaced.insert(id);
         }
         let key = info.key.clone();
         if let Some(serial) = info.serial {
@@ -84,6 +130,7 @@ impl Topology {
     }
 
     pub fn remove_node(&mut self, id: u32) {
+        self.reservation_displaced.remove(&id);
         if let Some(serial) = self.nodes.remove(&id).and_then(|node| node.serial) {
             self.slots.entries.remove(&serial);
             self.slots.save();
@@ -122,6 +169,7 @@ impl Topology {
     }
 
     pub fn clear(&mut self) {
+        self.reservation_displaced.clear();
         self.nodes.clear();
         self.ports.clear();
     }
@@ -212,7 +260,7 @@ mod tests {
             ..Topology::default()
         };
         assert_eq!(add(&mut after, 2, "Firefox"), "Firefox#2");
-        after.finish_enumeration();
+        assert!(after.finish_enumeration().is_empty());
         assert_eq!(add(&mut after, 3, "Firefox"), "Firefox");
     }
 
@@ -225,9 +273,34 @@ mod tests {
         topology.enumerating = true;
         assert_eq!(add(&mut topology, 3, "Firefox"), "Firefox#3");
         assert_eq!(add(&mut topology, 2, "Firefox"), "Firefox#2");
-        topology.finish_enumeration();
+        assert_eq!(
+            topology.finish_enumeration(),
+            vec![(3, "Firefox#3".into(), "Firefox".into())]
+        );
         assert!(!topology.slots.entries.contains_key(&1));
-        assert_eq!(add(&mut topology, 4, "Firefox"), "Firefox");
+        assert_eq!(add(&mut topology, 4, "Firefox"), "Firefox#3");
+    }
+
+    #[test]
+    fn restarted_streams_reclaim_stale_reserved_keys_in_serial_order() {
+        let mut topology = Topology::default();
+        add(&mut topology, 1, "TestApp");
+        add(&mut topology, 2, "TestApp");
+        topology.clear();
+        topology.enumerating = true;
+        assert_eq!(add(&mut topology, 4, "TestApp"), "TestApp#3");
+        assert_eq!(add(&mut topology, 3, "TestApp"), "TestApp#4");
+        assert_eq!(
+            topology.finish_enumeration(),
+            vec![
+                (3, "TestApp#4".into(), "TestApp".into()),
+                (4, "TestApp#3".into(), "TestApp#2".into()),
+            ]
+        );
+        assert_eq!(topology.node_key(3), Some("TestApp"));
+        assert_eq!(topology.node_key(4), Some("TestApp#2"));
+        assert_eq!(topology.slots.entries[&4].1, "TestApp#2");
+        assert!(topology.finish_enumeration().is_empty());
     }
 
     #[test]

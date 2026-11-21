@@ -2,7 +2,7 @@ Conduit is a GTK4 patchbay for PipeWire, built for visual routing across audio, 
 
 ![Screenshot](docs/screenshot.png)
 
-Conduit can also create virtual inputs and outputs for more complex routing setups. It remembers them, along with their volume and connections, and sets them back up every time it starts. Turn on "Run on Startup" in the menu to have that happen at login; Conduit then starts in the tray.
+Conduit can also create virtual inputs and outputs for more complex routing setups. It remembers them, along with their volume and connections, and sets them back up every time it starts. Virtual devices keep running after Conduit quits, so anything routed through them keeps working; remove one from the "Virtual devices" dialog when you no longer need it. Turn on "Run on Startup" in the menu to have that happen at login; Conduit then starts in the tray.
 
 # Installing and updating
 

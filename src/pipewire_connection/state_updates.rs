@@ -35,8 +35,78 @@ use pipewire::{
 use super::{notify, serialize_pod, GtkSender, Proxies, ProxyItem, SharedState};
 use crate::{PipewireMessage, VirtualDeviceChannels, VirtualDeviceKind};
 
-/// Virtual device nodes owned by this session, by Conduit's request id.
-pub(super) type VirtualDevices = Rc<RefCell<HashMap<u32, Node>>>;
+/// A request to create a virtual device.
+pub(super) struct CreateRequest {
+    pub id: u32,
+    pub name: String,
+    pub node_name: String,
+    pub kind: VirtualDeviceKind,
+    pub channels: VirtualDeviceChannels,
+}
+
+/// The virtual devices this connection manages, by Conduit's request id.
+///
+/// The nodes linger in PipeWire, so they outlive Conduit and a later launch
+/// finds them in the registry. Create requests therefore wait until the
+/// registry has been listed once: only then is it known which devices are
+/// already there and must be adopted instead of created a second time.
+pub(super) struct VirtualDevices<P = Node> {
+    registry_listed: bool,
+    waiting: Vec<CreateRequest>,
+    devices: HashMap<u32, ManagedDevice<P>>,
+}
+
+struct ManagedDevice<P> {
+    node_name: String,
+    /// Kept for devices created on this connection; adopted ones have none.
+    _proxy: Option<P>,
+}
+
+pub(super) type SharedVirtualDevices = Rc<RefCell<VirtualDevices>>;
+
+impl<P> Default for VirtualDevices<P> {
+    fn default() -> Self {
+        Self {
+            registry_listed: false,
+            waiting: Vec::new(),
+            devices: HashMap::new(),
+        }
+    }
+}
+
+impl<P> VirtualDevices<P> {
+    /// Hand the request back if it can be handled now, or keep it until
+    /// [`Self::registry_listed`].
+    fn ready(&mut self, request: CreateRequest) -> Option<CreateRequest> {
+        if self.registry_listed {
+            Some(request)
+        } else {
+            self.waiting.push(request);
+            None
+        }
+    }
+
+    /// The registry has been listed; returns the requests that were waiting for it.
+    fn registry_listed(&mut self) -> Vec<CreateRequest> {
+        self.registry_listed = true;
+        std::mem::take(&mut self.waiting)
+    }
+
+    fn manage(&mut self, id: u32, node_name: String, proxy: Option<P>) {
+        self.devices.insert(
+            id,
+            ManagedDevice {
+                node_name,
+                _proxy: proxy,
+            },
+        );
+    }
+
+    /// Stop managing a device, returning its `node.name`.
+    fn forget(&mut self, id: u32) -> Option<String> {
+        self.devices.remove(&id).map(|device| device.node_name)
+    }
+}
 
 pub(super) fn set_node_volume(id: u32, volume: f32, proxies: &Proxies) {
     let proxies = proxies.borrow();
@@ -116,21 +186,70 @@ pub(super) fn disconnect_node(node_id: u32, registry: &Registry, state: &SharedS
     }
 }
 
-/// Create an audio adapter backed by PipeWire's null-audio node.
+/// Create a virtual device, or adopt the one a previous Conduit left running.
+pub(super) fn create_virtual_device(
+    request: CreateRequest,
+    core: &Core,
+    state: &SharedState,
+    virtual_devices: &SharedVirtualDevices,
+    sender: &GtkSender,
+) {
+    let Some(request) = virtual_devices.borrow_mut().ready(request) else {
+        return;
+    };
+    create_or_adopt_virtual_device(request, core, state, virtual_devices, sender);
+}
+
+/// Handle the create requests that arrived before the registry was listed.
+pub(super) fn registry_listed(
+    core: &Core,
+    state: &SharedState,
+    virtual_devices: &SharedVirtualDevices,
+    sender: &GtkSender,
+) {
+    let waiting = virtual_devices.borrow_mut().registry_listed();
+    for request in waiting {
+        create_or_adopt_virtual_device(request, core, state, virtual_devices, sender);
+    }
+}
+
+/// Create an audio adapter backed by PipeWire's null-audio node, unless a node
+/// with the same `node.name` is already there.
 ///
 /// A virtual output accepts audio from applications and exposes monitor output
 /// ports for routing. A virtual input exposes ports that can be fed by the graph.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn create_virtual_device(
-    id: u32,
-    name: String,
-    node_name: String,
-    kind: VirtualDeviceKind,
-    channels: VirtualDeviceChannels,
+///
+/// The node lingers: it stays in PipeWire when Conduit quits or loses its
+/// connection, so whatever is routed through it keeps working. It goes away
+/// when it is removed in Conduit or when PipeWire restarts.
+fn create_or_adopt_virtual_device(
+    request: CreateRequest,
     core: &Core,
-    virtual_devices: &VirtualDevices,
+    state: &SharedState,
+    virtual_devices: &SharedVirtualDevices,
     sender: &GtkSender,
 ) {
+    let CreateRequest {
+        id,
+        name,
+        node_name,
+        kind,
+        channels,
+    } = request;
+    let created = PipewireMessage::VirtualDeviceCreated {
+        id,
+        name: name.clone(),
+        kind,
+        channels,
+    };
+
+    if state.borrow().node_id_by_name(&node_name).is_some() {
+        info!("Virtual audio device '{name}' is already running");
+        virtual_devices.borrow_mut().manage(id, node_name, None);
+        notify(sender, created);
+        return;
+    }
+
     let audio_position = match channels {
         VirtualDeviceChannels::Mono => "MONO",
         VirtualDeviceChannels::Stereo => "FL,FR",
@@ -148,7 +267,8 @@ pub(super) fn create_virtual_device(
                 "node.virtual" => "true",
                 "node.autoconnect" => "false",
                 "monitor.channel-volumes" => "true",
-                "application.name" => "Conduit"
+                "application.name" => "Conduit",
+                "object.linger" => "true"
             },
         ),
         VirtualDeviceKind::Source => core.create_object::<Node>(
@@ -162,7 +282,8 @@ pub(super) fn create_virtual_device(
                 "node.virtual" => "true",
                 "node.autoconnect" => "false",
                 "monitor.passthrough" => "true",
-                "application.name" => "Conduit"
+                "application.name" => "Conduit",
+                "object.linger" => "true"
             },
         ),
     };
@@ -170,16 +291,10 @@ pub(super) fn create_virtual_device(
     match result {
         Ok(node) => {
             info!("Created virtual audio device '{name}'");
-            virtual_devices.borrow_mut().insert(id, node);
-            notify(
-                sender,
-                PipewireMessage::VirtualDeviceCreated {
-                    id,
-                    name,
-                    kind,
-                    channels,
-                },
-            );
+            virtual_devices
+                .borrow_mut()
+                .manage(id, node_name, Some(node));
+            notify(sender, created);
         }
         Err(error) => {
             warn!("Failed to create virtual audio device: {error}");
@@ -195,11 +310,12 @@ pub(super) fn create_virtual_device(
 
 pub(super) fn remove_virtual_device(
     id: u32,
-    core: &Core,
-    virtual_devices: &VirtualDevices,
+    registry: &Registry,
+    state: &SharedState,
+    virtual_devices: &SharedVirtualDevices,
     sender: &GtkSender,
 ) {
-    let Some(node) = virtual_devices.borrow_mut().remove(&id) else {
+    let Some(node_name) = virtual_devices.borrow_mut().forget(id) else {
         notify(
             sender,
             PipewireMessage::VirtualDeviceError {
@@ -209,18 +325,14 @@ pub(super) fn remove_virtual_device(
         return;
     };
 
-    match core.destroy_object(node) {
-        Ok(_) => notify(sender, PipewireMessage::VirtualDeviceRemoved { id }),
-        Err(error) => {
-            warn!("Failed to remove virtual audio device: {error}");
-            notify(
-                sender,
-                PipewireMessage::VirtualDeviceError {
-                    message: format!("Could not remove the virtual device: {error}"),
-                },
-            );
-        }
+    // A lingering node is not tied to the proxy that created it, so it has to
+    // be destroyed through the registry. If it is not listed, something else
+    // already removed it. A failure comes back as a core error, which is logged.
+    if let Some(node_id) = state.borrow().node_id_by_name(&node_name) {
+        info!("Removing virtual audio device node {node_id} ({node_name})");
+        registry.destroy_global(node_id);
     }
+    notify(sender, PipewireMessage::VirtualDeviceRemoved { id });
 }
 
 /// Toggle a link between the two specified ports.
@@ -267,5 +379,54 @@ pub(super) fn create_link(port_from: u32, port_to: u32, core: &Core, state: &Sha
         },
     ) {
         warn!("Failed to create link: {}", e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(id: u32) -> CreateRequest {
+        CreateRequest {
+            id,
+            name: format!("Device {id}"),
+            node_name: format!("conduit.virtual.sink.device_{id}"),
+            kind: VirtualDeviceKind::Sink,
+            channels: VirtualDeviceChannels::Stereo,
+        }
+    }
+
+    #[test]
+    fn create_requests_wait_for_the_registry_listing() {
+        let mut devices = VirtualDevices::<()>::default();
+        assert!(devices.ready(request(0)).is_none());
+        assert!(devices.ready(request(1)).is_none());
+
+        let waiting: Vec<u32> = devices
+            .registry_listed()
+            .iter()
+            .map(|request| request.id)
+            .collect();
+        assert_eq!(waiting, [0, 1]);
+
+        assert_eq!(devices.ready(request(2)).map(|request| request.id), Some(2));
+        assert!(devices.registry_listed().is_empty());
+    }
+
+    #[test]
+    fn managed_devices_are_forgotten_once() {
+        let mut devices = VirtualDevices::<()>::default();
+        devices.manage(3, "conduit.virtual.sink.mix".to_string(), None);
+        devices.manage(4, "conduit.virtual.source.mic".to_string(), Some(()));
+
+        assert_eq!(
+            devices.forget(3).as_deref(),
+            Some("conduit.virtual.sink.mix")
+        );
+        assert_eq!(devices.forget(3), None);
+        assert_eq!(
+            devices.forget(4).as_deref(),
+            Some("conduit.virtual.source.mic")
+        );
     }
 }

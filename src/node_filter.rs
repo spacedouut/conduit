@@ -1,5 +1,5 @@
 use adw::glib;
-use regex::{Regex, RegexSet};
+use regex::Regex;
 use std::{fmt, fs, path::PathBuf};
 
 /// A hidden-node pattern that is not a valid regular expression.
@@ -18,7 +18,7 @@ impl fmt::Display for InvalidPattern {
 /// Hidden-node patterns, compiled once when they are loaded or changed.
 pub struct NodeFilter {
     patterns: Vec<String>,
-    matcher: RegexSet,
+    matchers: Vec<Regex>,
     invalid: Vec<InvalidPattern>,
     path: PathBuf,
 }
@@ -43,10 +43,10 @@ impl NodeFilter {
     }
 
     fn from_patterns(patterns: Vec<String>, path: PathBuf) -> Self {
-        let (valid, invalid) = compile(&patterns);
+        let (matchers, invalid) = compile(&patterns);
         Self {
             patterns,
-            matcher: valid,
+            matchers,
             invalid,
             path,
         }
@@ -63,17 +63,19 @@ impl NodeFilter {
     }
 
     pub fn is_hidden(&self, node_key: &str) -> bool {
-        self.matcher.is_match(node_key)
+        self.matchers
+            .iter()
+            .any(|matcher| matcher.is_match(node_key))
     }
 
     /// Replace and save the patterns. Nothing changes if any pattern is invalid.
     pub fn set_patterns(&mut self, patterns: Vec<String>) -> Result<(), Vec<InvalidPattern>> {
-        let (matcher, invalid) = compile(&patterns);
+        let (matchers, invalid) = compile(&patterns);
         if !invalid.is_empty() {
             return Err(invalid);
         }
         self.patterns = patterns;
-        self.matcher = matcher;
+        self.matchers = matchers;
         self.invalid.clear();
         if let Some(parent) = self.path.parent() {
             if let Err(error) = fs::create_dir_all(parent)
@@ -94,23 +96,19 @@ pub fn parse_patterns(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn compile(patterns: &[String]) -> (RegexSet, Vec<InvalidPattern>) {
+fn compile(patterns: &[String]) -> (Vec<Regex>, Vec<InvalidPattern>) {
     let mut valid = Vec::new();
     let mut invalid = Vec::new();
     for pattern in patterns {
         match Regex::new(pattern) {
-            Ok(_) => valid.push(pattern.as_str()),
+            Ok(regex) => valid.push(regex),
             Err(error) => invalid.push(InvalidPattern {
                 pattern: pattern.clone(),
                 reason: describe(&error),
             }),
         }
     }
-    let matcher = RegexSet::new(valid).unwrap_or_else(|error| {
-        log::warn!("Could not combine hidden node patterns: {error}");
-        RegexSet::empty()
-    });
-    (matcher, invalid)
+    (valid, invalid)
 }
 
 /// The regex crate's syntax errors span several lines; keep the summary line.

@@ -95,8 +95,9 @@ impl CommentStore {
     }
 
     fn save(&mut self) {
-        self.dirty = false;
-        persistence::write_atomically(&self.path, &serialize(&self.comments), "comments");
+        // A failed write stays dirty so a later flush retries it.
+        self.dirty =
+            !persistence::write_atomically(&self.path, &serialize(&self.comments), "comments");
     }
 }
 
@@ -196,6 +197,24 @@ mod tests {
         fs::remove_file(&store.path).unwrap();
         store.flush();
         assert!(!store.path.exists());
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn failed_save_is_retried() {
+        let directory = persistence::test_directory("comment-retry");
+        let mut store = CommentStore::load_from(directory.join("comments"));
+        let id = store.add(0.0, 0.0);
+        // A directory in the temporary file's place makes the write fail.
+        fs::create_dir(store.path.with_extension("tmp")).unwrap();
+        store.set_text(id, "hey");
+        store.flush();
+        assert!(store.needs_save());
+
+        fs::remove_dir(store.path.with_extension("tmp")).unwrap();
+        store.flush();
+        assert!(!store.needs_save());
+        assert_eq!(saved(&store), "0\t0\t0\t686579\n");
         let _ = fs::remove_dir_all(directory);
     }
 

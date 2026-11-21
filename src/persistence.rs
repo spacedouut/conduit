@@ -38,9 +38,14 @@ pub(crate) fn decode(encoded: &str) -> Option<String> {
 
 /// Replace the file at `path` with `contents`, logging a warning naming
 /// `what` on failure. The previous file stays intact unless the write succeeds.
-pub(crate) fn write_atomically(path: &Path, contents: &str, what: &str) {
-    if let Err(error) = try_write_atomically(path, contents) {
-        log::warn!("Could not save {what}: {error}");
+/// Returns whether the file was written.
+pub(crate) fn write_atomically(path: &Path, contents: &str, what: &str) -> bool {
+    match try_write_atomically(path, contents) {
+        Ok(()) => true,
+        Err(error) => {
+            log::warn!("Could not save {what}: {error}");
+            false
+        }
     }
 }
 
@@ -103,10 +108,10 @@ mod tests {
     fn failed_write_keeps_previous_file() {
         let directory = test_directory("failed-write");
         let path = directory.join("store");
-        write_atomically(&path, "kept\n", "test");
+        assert!(write_atomically(&path, "kept\n", "test"));
         // A directory in the temporary file's place makes the write fail.
         fs::create_dir(path.with_extension("tmp")).unwrap();
-        write_atomically(&path, "lost\n", "test");
+        assert!(!write_atomically(&path, "lost\n", "test"));
         assert_eq!(fs::read_to_string(&path).unwrap(), "kept\n");
         let _ = fs::remove_dir_all(directory);
     }

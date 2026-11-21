@@ -23,7 +23,7 @@ use pipewire::{
     node::NodeInfoRef,
     port::{PortChangeMask, PortInfoRef},
     spa::{
-        param::{ParamInfoFlags, ParamType},
+        param::{ParamInfo, ParamInfoFlags, ParamType},
         pod::{Pod, Value, ValueArray},
         sys as spa_sys,
     },
@@ -144,9 +144,10 @@ pub(super) fn handle_port_info(
     let mut state = state.borrow_mut();
 
     if let Some(Item::Port { .. }) = state.get(id) {
-        // Info was an update, figure out if we should notify the GTK thread
-        if info.change_mask().contains(PortChangeMask::PARAMS) {
-            // TODO: React to param changes
+        // Info was an update. The format is the only thing the GTK thread
+        // tracks after the port was added, so re-read it when params changed.
+        if should_enum_format(info.change_mask(), param_flags(info.params())) {
+            proxy.enum_params(0, Some(ParamType::EnumFormat), 0, u32::MAX);
         }
         return;
     }
@@ -164,14 +165,8 @@ pub(super) fn handle_port_info(
 
     state.insert(id, Item::Port { node_id });
 
-    let params = info.params();
-    let enum_format_info = params
-        .iter()
-        .find(|param| param.id() == ParamType::EnumFormat);
-    if let Some(enum_format_info) = enum_format_info {
-        if enum_format_info.flags().contains(ParamInfoFlags::READ) {
-            proxy.enum_params(0, Some(ParamType::EnumFormat), 0, u32::MAX);
-        }
+    if enum_format_is_readable(param_flags(info.params())) {
+        proxy.enum_params(0, Some(ParamType::EnumFormat), 0, u32::MAX);
     }
 
     notify(
@@ -185,6 +180,22 @@ pub(super) fn handle_port_info(
             is_meter: is_meter(props),
         },
     );
+}
+
+fn param_flags(params: &[ParamInfo]) -> impl Iterator<Item = (ParamType, ParamInfoFlags)> + '_ {
+    params.iter().map(|param| (param.id(), param.flags()))
+}
+
+fn enum_format_is_readable(mut params: impl Iterator<Item = (ParamType, ParamInfoFlags)>) -> bool {
+    params.any(|(id, flags)| id == ParamType::EnumFormat && flags.contains(ParamInfoFlags::READ))
+}
+
+/// Whether an info update for a known port means its formats must be enumerated again.
+fn should_enum_format(
+    change_mask: PortChangeMask,
+    params: impl Iterator<Item = (ParamType, ParamInfoFlags)>,
+) -> bool {
+    change_mask.contains(PortChangeMask::PARAMS) && enum_format_is_readable(params)
 }
 
 pub(super) fn handle_port_enum_format(port_id: u32, param: Option<&Pod>, sender: &GtkSender) {
@@ -245,5 +256,54 @@ pub(super) fn handle_link_info(info: &LinkInfoRef, state: &SharedState, sender: 
                 media_type: get_link_media_type(info),
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const READABLE_ENUM_FORMAT: (ParamType, ParamInfoFlags) =
+        (ParamType::EnumFormat, ParamInfoFlags::READ);
+
+    #[test]
+    fn param_change_on_known_port_enumerates_formats_again() {
+        assert!(should_enum_format(
+            PortChangeMask::PARAMS,
+            [READABLE_ENUM_FORMAT].into_iter()
+        ));
+        assert!(should_enum_format(
+            PortChangeMask::PROPS | PortChangeMask::PARAMS,
+            [
+                (ParamType::Latency, ParamInfoFlags::READWRITE),
+                (ParamType::EnumFormat, ParamInfoFlags::READWRITE),
+            ]
+            .into_iter()
+        ));
+    }
+
+    #[test]
+    fn update_without_param_change_does_not_enumerate_formats() {
+        assert!(!should_enum_format(
+            PortChangeMask::PROPS,
+            [READABLE_ENUM_FORMAT].into_iter()
+        ));
+        assert!(!should_enum_format(
+            PortChangeMask::empty(),
+            [READABLE_ENUM_FORMAT].into_iter()
+        ));
+    }
+
+    #[test]
+    fn unreadable_or_missing_enum_format_is_not_enumerated() {
+        assert!(!should_enum_format(
+            PortChangeMask::PARAMS,
+            [(ParamType::EnumFormat, ParamInfoFlags::WRITE)].into_iter()
+        ));
+        assert!(!should_enum_format(
+            PortChangeMask::PARAMS,
+            [(ParamType::Format, ParamInfoFlags::READ)].into_iter()
+        ));
+        assert!(!should_enum_format(PortChangeMask::PARAMS, [].into_iter()));
     }
 }

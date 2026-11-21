@@ -24,8 +24,8 @@ impl VirtualDevice {
     }
 }
 
-/// Virtual devices owned by this Conduit session, and the saved ones that are
-/// recreated on every launch.
+/// Virtual devices this Conduit manages, and the saved ones that are set up
+/// again on every launch. They keep running in PipeWire after Conduit quits.
 #[derive(Default)]
 pub(super) struct DeviceManager {
     live: HashMap<u32, VirtualDevice>,
@@ -41,8 +41,8 @@ impl DeviceManager {
         self.connected = true;
     }
 
-    /// PipeWire drops requests it gets while disconnected, and the devices
-    /// this session owned are gone with the connection.
+    /// PipeWire drops requests it gets while disconnected. The devices may
+    /// still be running; reconnecting finds them again.
     pub fn disconnected(&mut self) {
         self.connected = false;
         self.pending_saves.clear();

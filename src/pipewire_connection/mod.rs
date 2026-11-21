@@ -276,9 +276,8 @@ pub(super) fn thread_main(gtk_sender: GtkSender, mut pw_receiver: PwReceiver<Gtk
         // Keep proxies and their listeners alive so that we can receive info events.
         let proxies: Proxies = Rc::new(RefCell::new(HashMap::new()));
         let state: SharedState = Rc::new(RefCell::new(State::new()));
-        // Holding these proxies owns the endpoints. They intentionally do not
-        // linger, so disconnecting or closing Conduit removes them.
-        let virtual_devices: state_updates::VirtualDevices = Rc::new(RefCell::new(HashMap::new()));
+        // The devices themselves linger in PipeWire and outlive this connection.
+        let virtual_devices = state_updates::SharedVirtualDevices::default();
 
         let receiver = pw_receiver.attach(mainloop.loop_(), {
             clone!(@strong mainloop, @strong core, @strong registry, @strong proxies, @strong state, @strong loop_state, @strong virtual_devices, @strong gtk_sender => move |msg| match msg {
@@ -291,18 +290,16 @@ pub(super) fn thread_main(gtk_sender: GtkSender, mut pw_receiver: PwReceiver<Gtk
                 GtkMessage::SetNodeVolume { node_id, volume } => state_updates::set_node_volume(node_id, volume, &proxies),
                 GtkMessage::DisconnectNode { node_id } => state_updates::disconnect_node(node_id, &registry, &state),
                 GtkMessage::CreateVirtualDevice { id, name, node_name, kind, channels } => state_updates::create_virtual_device(
-                    id,
-                    name,
-                    node_name,
-                    kind,
-                    channels,
+                    state_updates::CreateRequest { id, name, node_name, kind, channels },
                     &core,
+                    &state,
                     &virtual_devices,
                     &gtk_sender,
                 ),
                 GtkMessage::RemoveVirtualDevice { id } => state_updates::remove_virtual_device(
                     id,
-                    &core,
+                    &registry,
+                    &state,
                     &virtual_devices,
                     &gtk_sender,
                 ),
@@ -323,10 +320,11 @@ pub(super) fn thread_main(gtk_sender: GtkSender, mut pw_receiver: PwReceiver<Gtk
                 }
             }))
             .done(
-                clone!(@strong gtk_sender, @strong initial_sync => move |id, seq| {
+                clone!(@strong core, @strong state, @strong virtual_devices, @strong gtk_sender, @strong initial_sync => move |id, seq| {
                     if id == PW_ID_CORE && initial_sync.get() == Some(seq) {
                         initial_sync.set(None);
                         notify(&gtk_sender, PipewireMessage::RegistrySynced);
+                        state_updates::registry_listed(&core, &state, &virtual_devices, &gtk_sender);
                     }
                 }),
             )
@@ -371,7 +369,10 @@ pub(super) fn thread_main(gtk_sender: GtkSender, mut pw_receiver: PwReceiver<Gtk
 
         match core.sync(0) {
             Ok(seq) => initial_sync.set(Some(seq)),
-            Err(error) => warn!("Could not sync initial PipeWire registry: {error}"),
+            Err(error) => {
+                warn!("Could not sync initial PipeWire registry: {error}");
+                state_updates::registry_listed(&core, &state, &virtual_devices, &gtk_sender);
+            }
         }
         mainloop.run();
         pw_receiver = receiver.deattach();

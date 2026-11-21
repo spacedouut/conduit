@@ -82,7 +82,12 @@ pub(super) fn handle_node(
         })
         .or_else(|| props.get("media.class").and_then(media_class));
 
-    state.borrow_mut().insert(node_id, Item::Node);
+    state.borrow_mut().insert(
+        node_id,
+        Item::Node {
+            name: props.get(&keys::NODE_NAME).map(str::to_string),
+        },
+    );
 
     notify(
         sender,
@@ -263,7 +268,7 @@ pub(super) fn handle_global_remove(
         notify(
             sender,
             match item {
-                Item::Node => PipewireMessage::NodeRemoved { id },
+                Item::Node { .. } => PipewireMessage::NodeRemoved { id },
                 Item::Port { node_id } => PipewireMessage::PortRemoved { id, node_id },
                 Item::Link { .. } => PipewireMessage::LinkRemoved { id },
             },

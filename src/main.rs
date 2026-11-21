@@ -51,7 +51,8 @@ pub enum GtkMessage {
     DisconnectNode {
         node_id: u32,
     },
-    /// Create a virtual audio endpoint owned by this Conduit session.
+    /// Create a virtual audio endpoint, or take over the one with this
+    /// `node_name` that an earlier Conduit left running.
     CreateVirtualDevice {
         id: u32,
         name: String,
@@ -59,7 +60,7 @@ pub enum GtkMessage {
         kind: VirtualDeviceKind,
         channels: VirtualDeviceChannels,
     },
-    /// Remove a virtual audio endpoint created by this Conduit session.
+    /// Remove a virtual audio endpoint from PipeWire.
     RemoveVirtualDevice {
         id: u32,
     },

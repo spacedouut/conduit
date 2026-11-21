@@ -19,7 +19,10 @@ use std::collections::HashMap;
 /// Any pipewire item we need to keep track of.
 /// These will be saved in the `State` struct associated with their id.
 pub(super) enum Item {
-    Node,
+    Node {
+        /// The node's `node.name`, if it has one.
+        name: Option<String>,
+    },
     Port {
         // Save the id of the node this is on so we can remove the port from it
         // when it is deleted.
@@ -90,6 +93,17 @@ impl State {
         }
     }
 
+    /// The id of the node with this `node.name`; the oldest one if several share it.
+    pub fn node_id_by_name(&self, node_name: &str) -> Option<u32> {
+        self.items
+            .iter()
+            .filter_map(|(id, item)| match item {
+                Item::Node { name: Some(name) } if name == node_name => Some(*id),
+                _ => None,
+            })
+            .min()
+    }
+
     pub fn link_ids_for_node(&self, node_id: u32) -> Vec<u32> {
         self.items
             .iter()
@@ -103,5 +117,38 @@ impl State {
                 _ => None,
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(name: &str) -> Item {
+        Item::Node {
+            name: Some(name.to_string()),
+        }
+    }
+
+    #[test]
+    fn nodes_are_found_by_name_until_they_are_removed() {
+        let mut state = State::new();
+        state.insert(7, Item::Node { name: None });
+        state.insert(9, node("conduit.virtual.sink.mix"));
+        state.insert(12, Item::Port { node_id: 9 });
+
+        assert_eq!(state.node_id_by_name("conduit.virtual.sink.mix"), Some(9));
+        assert_eq!(state.node_id_by_name("conduit.virtual.sink.other"), None);
+
+        state.remove(9);
+        assert_eq!(state.node_id_by_name("conduit.virtual.sink.mix"), None);
+    }
+
+    #[test]
+    fn the_oldest_node_wins_when_names_collide() {
+        let mut state = State::new();
+        state.insert(40, node("conduit.virtual.sink.mix"));
+        state.insert(31, node("conduit.virtual.sink.mix"));
+        assert_eq!(state.node_id_by_name("conduit.virtual.sink.mix"), Some(31));
     }
 }

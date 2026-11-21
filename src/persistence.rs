@@ -50,6 +50,9 @@ pub(crate) fn write_atomically(path: &Path, contents: &str, what: &str) -> bool 
 }
 
 fn try_write_atomically(path: &Path, contents: &str) -> io::Result<()> {
+    // Write through a symlinked file instead of replacing the link.
+    let target = fs::canonicalize(path);
+    let path = target.as_deref().unwrap_or(path);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -101,6 +104,21 @@ mod tests {
         write_atomically(&path, "two\n", "test");
         assert_eq!(fs::read_to_string(&path).unwrap(), "two\n");
         assert!(!path.with_extension("tmp").exists());
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_follows_symlinks() {
+        let directory = test_directory("symlink");
+        let target = directory.join("dotfiles/store");
+        write_atomically(&target, "one\n", "test");
+        let link = directory.join("store");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(write_atomically(&link, "two\n", "test"));
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "two\n");
         let _ = fs::remove_dir_all(directory);
     }
 

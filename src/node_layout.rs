@@ -4,7 +4,7 @@
 
 use std::{collections::HashMap, fs, path::PathBuf};
 
-use adw::glib;
+use crate::persistence::{self, decode as decode_key, encode as encode_key};
 
 #[derive(Default)]
 pub struct NodeLayout {
@@ -14,7 +14,7 @@ pub struct NodeLayout {
 
 impl NodeLayout {
     pub fn load() -> Self {
-        let path = glib::user_config_dir().join("conduit/node-layout");
+        let path = persistence::config_path("node-layout");
         let mut layout = Self {
             positions: HashMap::new(),
             path,
@@ -52,47 +52,17 @@ impl NodeLayout {
     }
 
     fn save(&self) {
-        let Some(parent) = self.path.parent() else {
-            return;
-        };
-        if let Err(error) = fs::create_dir_all(parent) {
-            log::warn!("Could not create node-layout directory: {error}");
-            return;
-        }
-
-        let mut positions: Vec<_> = self.positions.iter().collect();
-        positions.sort_unstable_by_key(|(key, _)| *key);
-        let contents = positions
-            .into_iter()
-            .map(|(key, (x, y))| format!("{}\t{x}\t{y}\n", encode_key(key)))
-            .collect::<String>();
-
-        let temporary_path = self.path.with_extension("tmp");
-        if let Err(error) = fs::write(&temporary_path, contents)
-            .and_then(|_| fs::rename(&temporary_path, &self.path))
-        {
-            log::warn!("Could not save node layout: {error}");
-            let _ = fs::remove_file(temporary_path);
-        }
+        persistence::write_atomically(&self.path, &serialize(&self.positions), "node layout");
     }
 }
 
-pub(crate) fn encode_key(key: &str) -> String {
-    key.as_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
+fn serialize(positions: &HashMap<String, (f32, f32)>) -> String {
+    let mut positions: Vec<_> = positions.iter().collect();
+    positions.sort_unstable_by_key(|(key, _)| *key);
+    positions
+        .into_iter()
+        .map(|(key, (x, y))| format!("{}\t{x}\t{y}\n", encode_key(key)))
         .collect()
-}
-
-pub(crate) fn decode_key(encoded: &str) -> Option<String> {
-    if encoded.len() % 2 != 0 {
-        return None;
-    }
-    let bytes = (0..encoded.len())
-        .step_by(2)
-        .map(|index| u8::from_str_radix(&encoded[index..index + 2], 16).ok())
-        .collect::<Option<Vec<_>>>()?;
-    String::from_utf8(bytes).ok()
 }
 
 #[cfg(test)]
@@ -103,5 +73,14 @@ mod tests {
     fn node_names_round_trip() {
         let key = "alsa_output.usb-Example Device_123-00.analog-stereo#2";
         assert_eq!(decode_key(&encode_key(key)).as_deref(), Some(key));
+    }
+
+    #[test]
+    fn serializes_in_the_saved_format() {
+        let positions = [("b".to_owned(), (1.5, -2.0)), ("a".to_owned(), (0.0, 30.0))];
+        assert_eq!(
+            super::serialize(&positions.into_iter().collect()),
+            "61\t0\t30\n62\t1.5\t-2\n"
+        );
     }
 }

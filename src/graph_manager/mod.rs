@@ -56,6 +56,7 @@ mod imp {
     use crate::{ui::graph, MediaType, NodeType};
 
     const VOLUME_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+    const COMMENT_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
     #[derive(Default, glib::Properties)]
     #[properties(wrapper_type = super::GraphManager)]
@@ -87,11 +88,12 @@ mod imp {
         pub(super) node_filter: RefCell<crate::node_filter::NodeFilter>,
         link_restore_queued: Cell<bool>,
         volume_save_queued: Cell<bool>,
+        comment_save_queued: Cell<bool>,
     }
 
     impl Drop for GraphManager {
         fn drop(&mut self) {
-            self.volumes.borrow_mut().save();
+            self.save_pending();
         }
     }
 
@@ -106,6 +108,11 @@ mod imp {
     impl ObjectImpl for GraphManager {}
 
     impl GraphManager {
+        pub(super) fn save_pending(&self) {
+            self.volumes.borrow_mut().save();
+            self.comments.borrow_mut().flush();
+        }
+
         pub async fn receive(&self, receiver: async_channel::Receiver<crate::PipewireMessage>) {
             while let Ok(msg) = receiver.recv().await {
                 self.handle_message(msg);
@@ -386,6 +393,21 @@ mod imp {
                 if let Some(manager) = manager.upgrade() {
                     manager.imp().volume_save_queued.set(false);
                     manager.imp().volumes.borrow_mut().save();
+                }
+            });
+        }
+
+        /// Write edited comment text shortly, so typing doesn't rewrite the
+        /// file for every keystroke.
+        pub(super) fn queue_comment_save(&self) {
+            if !self.comments.borrow().needs_save() || self.comment_save_queued.replace(true) {
+                return;
+            }
+            let manager = self.obj().downgrade();
+            glib::timeout_add_local_once(COMMENT_SAVE_DELAY, move || {
+                if let Some(manager) = manager.upgrade() {
+                    manager.imp().comment_save_queued.set(false);
+                    manager.imp().comments.borrow_mut().flush();
                 }
             });
         }
@@ -718,6 +740,7 @@ impl GraphManager {
             glib::clone!(@weak self as manager => move |buffer| {
                 let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
                 manager.imp().comments.borrow_mut().set_text(id, &text);
+                manager.imp().queue_comment_save();
             }),
         );
         node.connect_local(
@@ -794,6 +817,11 @@ impl GraphManager {
 
     fn request_remove_virtual_device(&self, id: u32) {
         self.imp().send(GtkMessage::RemoveVirtualDevice { id });
+    }
+
+    /// Write changes that are still waiting for their save timer.
+    pub fn save_pending(&self) {
+        self.imp().save_pending();
     }
 
     pub fn new(

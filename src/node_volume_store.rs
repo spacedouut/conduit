@@ -6,9 +6,7 @@
 
 use std::{collections::HashMap, fs, path::PathBuf};
 
-use adw::glib;
-
-use crate::node_layout::{decode_key, encode_key};
+use crate::persistence::{self, decode as decode_key, encode as encode_key};
 
 #[derive(Default)]
 pub struct NodeVolumeStore {
@@ -18,7 +16,7 @@ pub struct NodeVolumeStore {
 
 impl NodeVolumeStore {
     pub fn load() -> Self {
-        let path = glib::user_config_dir().join("conduit/node-volumes");
+        let path = persistence::config_path("node-volumes");
         let volumes = fs::read_to_string(&path)
             .map(|contents| parse(&contents))
             .unwrap_or_default();
@@ -49,20 +47,7 @@ impl NodeVolumeStore {
     }
 
     pub fn save(&self) {
-        let Some(parent) = self.path.parent() else {
-            return;
-        };
-        if let Err(error) = fs::create_dir_all(parent) {
-            log::warn!("Could not create config directory for node volumes: {error}");
-            return;
-        }
-        let temporary_path = self.path.with_extension("tmp");
-        if let Err(error) = fs::write(&temporary_path, serialize(&self.volumes))
-            .and_then(|_| fs::rename(&temporary_path, &self.path))
-        {
-            log::warn!("Could not save node volumes: {error}");
-            let _ = fs::remove_file(temporary_path);
-        }
+        persistence::write_atomically(&self.path, &serialize(&self.volumes), "node volumes");
     }
 }
 
@@ -111,5 +96,14 @@ mod tests {
         let parsed = parse(&contents);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed.get("b"), Some(&0.3));
+    }
+
+    #[test]
+    fn serializes_in_the_saved_format() {
+        let volumes = [("b".to_owned(), 0.25), ("a".to_owned(), 1.0)];
+        assert_eq!(
+            serialize(&volumes.into_iter().collect()),
+            "61\t1\n62\t0.25\n"
+        );
     }
 }

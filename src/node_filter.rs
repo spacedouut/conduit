@@ -1,6 +1,7 @@
-use adw::glib;
 use regex::Regex;
 use std::{fmt, fs, path::PathBuf};
+
+use crate::persistence;
 
 /// A hidden-node pattern that is not a valid regular expression.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,7 +32,7 @@ impl Default for NodeFilter {
 
 impl NodeFilter {
     pub fn load() -> Self {
-        let path = glib::user_config_dir().join("conduit/hidden-node-patterns");
+        let path = persistence::config_path("hidden-node-patterns");
         let patterns = fs::read_to_string(&path)
             .map(|text| parse_patterns(&text))
             .unwrap_or_default();
@@ -77,13 +78,11 @@ impl NodeFilter {
         self.patterns = patterns;
         self.matchers = matchers;
         self.invalid.clear();
-        if let Some(parent) = self.path.parent() {
-            if let Err(error) = fs::create_dir_all(parent)
-                .and_then(|_| fs::write(&self.path, self.patterns.join("\n")))
-            {
-                log::warn!("Could not save hidden node patterns: {error}");
-            }
-        }
+        persistence::write_atomically(
+            &self.path,
+            &self.patterns.join("\n"),
+            "hidden node patterns",
+        );
         Ok(())
     }
 }

@@ -93,6 +93,9 @@ pub(super) fn handle_node(
         sender,
         PipewireMessage::NodeAdded {
             id: node_id,
+            serial: props
+                .get("object.serial")
+                .and_then(|serial| serial.parse().ok()),
             name,
             layout_key,
             node_type,

@@ -91,8 +91,12 @@ there, plus a handler on the receiving side.
 - `VirtualDeviceCreated`, `VirtualDeviceRemoved`, `VirtualDeviceError`
 - `Connecting`, `Connected`, `Disconnected`
 
-Everything is identified by its PipeWire global id (`u32`). Ids are only valid for one connection,
-so anything that is saved uses names instead (see [Saved data](#saved-data)).
+Nodes, ports and links are identified by their PipeWire global id (`u32`). Ids are only valid for
+one connection, so anything that is saved uses names instead (see [Saved data](#saved-data)).
+
+The `id` in the virtual-device messages is different: it is a request id that
+`DeviceManager` hands out on the GTK thread, and has nothing to do with PipeWire's ids. The PipeWire
+thread finds the device's node by its `node.name`.
 
 Neither side blocks on the other, and neither panics when the other is gone: a failed send is
 logged and the message is dropped.

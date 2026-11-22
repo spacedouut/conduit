@@ -273,7 +273,12 @@ pub(super) fn handle_global_remove(
                 Item::Link { .. } => PipewireMessage::LinkRemoved { id },
             },
         );
-    } else if !matches!(proxies.borrow().get(&id), Some(ProxyItem::Device { .. })) {
+    } else if matches!(
+        proxies.borrow().get(&id),
+        Some(ProxyItem::Node { .. } | ProxyItem::Port { .. } | ProxyItem::Link { .. })
+    ) {
+        // Only globals we bound are expected in the state. Clients, modules and
+        // other globals come and go all the time without ever being tracked.
         warn!("Attempted to remove item with id {id} that is not saved in state");
     }
 

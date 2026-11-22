@@ -253,8 +253,10 @@ The stores save themselves when they change. `persistence.rs` holds what they sh
 path, the hex encoding, and `write_atomically`, which writes a new temporary file next to the
 target and renames it over, so an interrupted save leaves the previous file intact. If the target
 is a symlink, the file it points to is replaced and the link is kept. (`node-slots` and `autostart`
-do not go through it.) Comment text and `node-volumes` are written 500 ms after the last change,
-and `Application::shutdown` writes whatever is still waiting. A failed
+do not go through it.) Comment text and `node-volumes` are written at most once every 500 ms:
+the first unsaved change starts a timer, and when it fires everything changed since is written, so
+a save can happen while the user is still typing or dragging. `Application::shutdown` writes
+whatever is still waiting. A failed
 save is logged as a warning and the change is kept in memory only.
 
 Nodes are matched by their key (see [Node keys](#node-keys)) and ports by `port.name`, because

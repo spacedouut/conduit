@@ -450,9 +450,12 @@ mod imp {
             }
 
             let cursor = Point::new(x as f32, y as f32);
+            // Nodes hidden since they were selected must not be moved unseen.
+            let mut visible_selection = self.selection.borrow().clone();
+            visible_selection.retain(|node| node.is_visible());
             let Some(node) = target.ancestor(Node::static_type()).and_downcast::<Node>() else {
                 let base_selection = if extend {
-                    self.selection.borrow().clone()
+                    visible_selection
                 } else {
                     HashSet::new()
                 };
@@ -465,7 +468,7 @@ mod imp {
                 return;
             };
 
-            let mut selection = self.selection.borrow().clone();
+            let mut selection = visible_selection;
             let mut deselect_on_click = None;
             if extend && selection.contains(&node) {
                 deselect_on_click = Some(node.downgrade());

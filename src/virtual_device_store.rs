@@ -105,6 +105,8 @@ impl Store {
             .any(|device| device.definition.node_name() == node_name)
     }
 
+    /// Save a new device. It starts at full volume, whatever volume a session
+    /// manager remembers for a removed device of the same name.
     pub fn add(&mut self, definition: Definition) {
         if !self
             .devices
@@ -113,7 +115,7 @@ impl Store {
         {
             self.devices.push(SavedDevice {
                 definition,
-                volume: None,
+                volume: Some(1.0),
             });
             self.save_devices();
         }

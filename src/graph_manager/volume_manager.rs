@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use crate::{node_volume_store::NodeVolumeStore, virtual_device_store::Store};
 
@@ -14,13 +17,19 @@ pub(super) fn linear_from_slider(value: f64) -> f32 {
     value.max(0.0).powi(3) as f32
 }
 
+/// How long after a node's first volume report a saved volume keeps winning.
+/// A session manager applies the volume it remembers just after a node
+/// appears, which can be before or after that first report.
+const RESTORE_WINDOW: Duration = Duration::from_secs(2);
+
 /// Restores saved volumes when nodes appear and remembers volume changes.
 ///
 /// Virtual devices keep their volume with their definition; every other node
 /// the user changed the volume of in Conduit is remembered by `node.name`.
 pub(super) struct VolumeManager {
-    /// Nodes whose first reported volume should be replaced by a saved one.
-    pending_restores: HashSet<u32>,
+    /// Nodes whose reported volume should be replaced by a saved one, and
+    /// until when; the time is set by the first report.
+    pending_restores: HashMap<u32, Option<Instant>>,
     reported_volumes: HashMap<u32, f32>,
     saved: NodeVolumeStore,
     /// Whether `saved` changed since it was last written.
@@ -30,7 +39,7 @@ pub(super) struct VolumeManager {
 impl Default for VolumeManager {
     fn default() -> Self {
         Self {
-            pending_restores: HashSet::new(),
+            pending_restores: HashMap::new(),
             reported_volumes: HashMap::new(),
             saved: NodeVolumeStore::load(),
             dirty: false,
@@ -53,15 +62,21 @@ impl VolumeManager {
 
     pub fn node_added(&mut self, id: u32, key: &str, devices: &Store) {
         if self.saved_volume(key, devices).is_some() {
-            self.pending_restores.insert(id);
+            self.pending_restores.insert(id, None);
         }
     }
 
-    pub fn node_rekeyed(&mut self, id: u32, key: &str, devices: &mut Store) -> Option<f32> {
+    pub fn node_rekeyed(
+        &mut self,
+        id: u32,
+        key: &str,
+        devices: &mut Store,
+        now: Instant,
+    ) -> Option<f32> {
         self.pending_restores.remove(&id);
         self.node_added(id, key, devices);
         let volume = self.reported_volumes.get(&id).copied()?;
-        self.remote_volume_changed(id, key, volume, devices)
+        self.remote_volume_changed(id, key, volume, devices, now)
     }
 
     /// The user moved a volume slider.
@@ -79,15 +94,20 @@ impl VolumeManager {
         key: &str,
         volume: f32,
         devices: &mut Store,
+        now: Instant,
     ) -> Option<f32> {
         self.reported_volumes.insert(id, volume);
-        if self.pending_restores.remove(&id) {
-            if let Some(saved) = self
-                .saved_volume(key, devices)
-                .filter(|saved| (saved - volume).abs() > 0.0001)
-            {
-                log::info!("Restoring volume {saved} on {key}");
-                return Some(saved);
+        if let Some(until) = self.pending_restores.get(&id).copied() {
+            let saved = self.saved_volume(key, devices);
+            if saved.is_none() || until.is_some_and(|until| now >= until) {
+                self.pending_restores.remove(&id);
+            } else {
+                self.pending_restores
+                    .insert(id, Some(until.unwrap_or(now + RESTORE_WINDOW)));
+                if let Some(saved) = saved.filter(|saved| (saved - volume).abs() > 0.0001) {
+                    log::info!("Restoring volume {saved} on {key}");
+                    return Some(saved);
+                }
             }
         }
         // Keep up with changes made elsewhere (another mixer, the session
@@ -127,7 +147,7 @@ mod tests {
 
     fn manager() -> VolumeManager {
         VolumeManager {
-            pending_restores: HashSet::new(),
+            pending_restores: HashMap::new(),
             reported_volumes: HashMap::new(),
             saved: NodeVolumeStore::default(),
             dirty: false,
@@ -138,12 +158,13 @@ mod tests {
     fn rekey_before_first_report_preserves_unity_restore() {
         let mut manager = manager();
         let mut devices = Store::default();
+        let now = Instant::now();
         manager.saved.set_volume("TestApp", 1.0);
         manager.node_added(1, "TestApp#3", &devices);
-        assert_eq!(manager.node_rekeyed(1, "TestApp", &mut devices), None);
-        assert!(manager.pending_restores.contains(&1));
+        assert_eq!(manager.node_rekeyed(1, "TestApp", &mut devices, now), None);
+        assert!(manager.pending_restores.contains_key(&1));
         assert_eq!(
-            manager.remote_volume_changed(1, "TestApp", 0.25, &mut devices),
+            manager.remote_volume_changed(1, "TestApp", 0.25, &mut devices, now),
             Some(1.0)
         );
         assert_eq!(manager.saved.volume("TestApp"), Some(1.0));
@@ -153,15 +174,19 @@ mod tests {
     fn rekey_after_report_restores_using_reported_volume() {
         let mut manager = manager();
         let mut devices = Store::default();
+        let now = Instant::now();
         manager.saved.set_volume("TestApp", 1.0);
         assert_eq!(
-            manager.remote_volume_changed(1, "TestApp#3", 0.25, &mut devices),
+            manager.remote_volume_changed(1, "TestApp#3", 0.25, &mut devices, now),
             None
         );
-        assert_eq!(manager.node_rekeyed(1, "TestApp", &mut devices), Some(1.0));
+        assert_eq!(
+            manager.node_rekeyed(1, "TestApp", &mut devices, now),
+            Some(1.0)
+        );
         manager.node_removed(1);
-        assert_eq!(manager.node_rekeyed(1, "TestApp", &mut devices), None);
-        assert!(manager.pending_restores.contains(&1));
+        assert_eq!(manager.node_rekeyed(1, "TestApp", &mut devices, now), None);
+        assert!(manager.pending_restores.contains_key(&1));
         manager.clear();
         assert!(manager.reported_volumes.is_empty());
         assert!(manager.pending_restores.is_empty());
@@ -171,10 +196,53 @@ mod tests {
     fn rekey_without_saved_volume_does_not_restore() {
         let mut manager = manager();
         let mut devices = Store::default();
-        manager.remote_volume_changed(1, "TestApp#3", 0.25, &mut devices);
-        assert_eq!(manager.node_rekeyed(1, "TestApp", &mut devices), None);
-        assert!(!manager.pending_restores.contains(&1));
+        let now = Instant::now();
+        manager.remote_volume_changed(1, "TestApp#3", 0.25, &mut devices, now);
+        assert_eq!(manager.node_rekeyed(1, "TestApp", &mut devices, now), None);
+        assert!(!manager.pending_restores.contains_key(&1));
         assert_eq!(manager.saved.volume("TestApp"), None);
+    }
+
+    #[test]
+    fn saved_volume_wins_over_one_applied_just_after_the_first_report() {
+        let mut manager = manager();
+        let mut devices = Store::default();
+        let now = Instant::now();
+        manager.saved.set_volume("TestApp", 1.0);
+        manager.node_added(1, "TestApp", &devices);
+        assert_eq!(
+            manager.remote_volume_changed(1, "TestApp", 1.0, &mut devices, now),
+            None
+        );
+        let soon = now + RESTORE_WINDOW / 2;
+        assert_eq!(
+            manager.remote_volume_changed(1, "TestApp", 0.25, &mut devices, soon),
+            Some(1.0)
+        );
+        assert_eq!(manager.saved.volume("TestApp"), Some(1.0));
+
+        let later = now + RESTORE_WINDOW;
+        assert_eq!(
+            manager.remote_volume_changed(1, "TestApp", 0.25, &mut devices, later),
+            None
+        );
+        assert_eq!(manager.saved.volume("TestApp"), Some(0.25));
+    }
+
+    #[test]
+    fn user_volume_ends_the_restore() {
+        let mut manager = manager();
+        let mut devices = Store::default();
+        let now = Instant::now();
+        manager.saved.set_volume("TestApp", 1.0);
+        manager.node_added(1, "TestApp", &devices);
+        manager.remote_volume_changed(1, "TestApp", 1.0, &mut devices, now);
+        manager.user_set_volume(1, "TestApp", 0.5, &mut devices);
+        assert_eq!(
+            manager.remote_volume_changed(1, "TestApp", 0.25, &mut devices, now),
+            None
+        );
+        assert_eq!(manager.saved.volume("TestApp"), Some(0.25));
     }
 
     #[test]

@@ -45,6 +45,7 @@ mod imp {
     use std::{
         cell::{Cell, OnceCell, RefCell},
         collections::HashMap,
+        time::Instant,
     };
 
     use super::{
@@ -232,6 +233,7 @@ mod imp {
                             *id,
                             key,
                             &mut self.devices.borrow_mut().store,
+                            Instant::now(),
                         );
                         if let Some(saved) = restore {
                             self.send(GtkMessage::SetNodeVolume {
@@ -356,6 +358,7 @@ mod imp {
                 &key,
                 volume,
                 &mut self.devices.borrow_mut().store,
+                Instant::now(),
             );
             if let Some(saved) = restore {
                 self.send(GtkMessage::SetNodeVolume {

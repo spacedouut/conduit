@@ -90,6 +90,7 @@ there, plus a handler on the receiving side.
 - `LinkAdded`, `LinkStateChanged`, `LinkFormatChanged`, `LinkRemoved`
 - `VirtualDeviceCreated`, `VirtualDeviceRemoved`, `VirtualDeviceError`
 - `Connecting`, `Connected`, `Disconnected`
+- `CoreCookie`, `RegistrySynced`: see [Node keys](#node-keys)
 
 Nodes, ports and links are identified by their PipeWire global id (`u32`). Ids are only valid for
 one connection, so anything that is saved uses names instead (see [Saved data](#saved-data)).
@@ -145,17 +146,38 @@ data they need as arguments, which keeps them free of GTK:
 
 | Module | What it does |
 |---|---|
-| `topology.rs` | `Topology`: what the GTK thread knows about the nodes and ports on screen (`node.name`, port name and direction, monitor/meter/stream flags). The other modules use it to turn ids into names and back. |
+| `topology.rs` | `Topology`: what the GTK thread knows about the nodes and ports on screen (`node.name`, key, port name and direction, monitor/meter/stream flags). The other modules use it to turn ids into names and back. |
 | `link_manager.rs` | `LinkManager`: tracks live links and keeps the saved links of virtual devices in sync with the store. |
 | `volume_manager.rs` | `VolumeManager`: restores saved volumes when nodes appear and remembers volume changes. Also the cubic slider scale. |
 | `device_manager.rs` | `DeviceManager`: the live virtual devices and the saved ones (it owns the `virtual_device_store::Store`). Builds and validates create requests. |
+| `node_slots.rs` | `NodeSlots`: the saved assignment of keys to live nodes that `Topology` uses. |
 | `dialogs.rs` | The dialogs for creating and removing virtual devices and for editing hidden-node patterns. |
 
-A node's "key" throughout these modules is its `node.name` (`NodeAdded::layout_key`; the display
-name if the node has none). Layout, volumes, hidden-node patterns and saved links all use it.
+A node's "key" throughout these modules is what its layout, volume and saved links are stored
+under. See [Node keys](#node-keys).
 
 On `Connected`, the manager asks for every saved virtual device to be created again (which adopts
 the ones still running). On `Disconnected`, it clears the graph and all per-connection state.
+
+## Node keys
+A node's key is its `node.name` (`NodeAdded::layout_key`; the display name if the node has none),
+made unique among the nodes that are there at the same time. `Topology::add_node` assigns it: the
+first node gets the name itself, and further nodes with the same name (two streams of one
+application, for example) get `name#2`, `name#3` and so on, reusing the lowest free one. A `#` or
+`\` in the name itself is escaped with a backslash, so a real name can not collide with a suffix.
+Hidden-node patterns are the exception: they match the plain `node.name`.
+
+So that the same stream keeps the same key when Conduit restarts while it is running, the
+assignment is saved in `node-slots` (`node_slots.rs`), by the node's `object.serial`
+(`NodeAdded::serial`). Serials are only meaningful for one run of PipeWire, so the file starts with
+the core's cookie and is ignored when the cookie differs. Two messages frame this:
+
+- `CoreCookie` arrives first on each connection; `Topology::begin_enumeration` loads `node-slots`.
+  While the existing nodes are being listed, keys saved for other serials stay reserved.
+- `RegistrySynced` arrives when everything that already existed has been listed.
+  `Topology::finish_enumeration` drops the reservations of nodes that are gone and moves nodes
+  that had to avoid one to the key they would otherwise have had. The manager then applies the
+  position and volume saved under the new key.
 
 ## Links
 Only links that touch a saved virtual device are remembered. For those, `LinkManager` decides:
@@ -179,7 +201,7 @@ dragging a slider does not rewrite the file on every step.
 ## Visibility
 `GraphManager::refresh_item_visibility` decides what is shown:
 
-- A node is hidden when a hidden-node pattern matches its key, or when it is a level meter and
+- A node is hidden when a hidden-node pattern matches its `node.name`, or when it is a level meter and
   meters are switched off.
 - A port is hidden when its node is hidden, when it is a monitor port and monitor ports are
   switched off, or when it is a meter port and meters are switched off.
@@ -218,7 +240,8 @@ for the Flatpak. All of it is read and written on the GTK thread.
 | `node-layout` | `node_layout.rs` | Node positions: node key, x, y. |
 | `node-volumes` | `node_volume_store.rs` | Volumes of other nodes: node key, linear volume. |
 | `comments` | `comment_store.rs` | Comment nodes: id, x, y, text. |
-| `hidden-node-patterns` | `node_filter.rs` | One regular expression per line, matched against the node key. Plain text. |
+| `hidden-node-patterns` | `node_filter.rs` | One regular expression per line, matched against the `node.name`. Plain text. |
+| `node-slots` | `graph_manager/node_slots.rs` | Which key each live node holds: the PipeWire core's cookie, then object serial, escaped `node.name`, key. See [Node keys](#node-keys). |
 | `show-volume-sliders` | `volume_slider_setting.rs` | `true` or `false`. |
 | `autostart` | `autostart.rs` | Flatpak only: the last answer of the Background portal. |
 
@@ -226,20 +249,13 @@ The formats are line based with tab-separated fields. Names, node keys, port nam
 text are written as hex-encoded UTF-8 so they can not contain a tab or a newline. Lines that do not
 parse are skipped when loading. Volumes are linear (1.0 is 100%), not the cubic slider value.
 
-The stores save themselves when they change. Most write a `.tmp` file next to the target and
-rename it over; `hidden-node-patterns` and `show-volume-sliders` are written in place. A failed
+The stores save themselves when they change. `persistence.rs` holds what they share: the config
+path, the hex encoding, and `write_atomically`, which writes a new temporary file next to the
+target and renames it over, so an interrupted save leaves the previous file intact. If the target
+is a symlink, the file it points to is replaced and the link is kept. (`node-slots` and `autostart`
+do not go through it.) Comment text and `node-volumes` are written 500 ms after the last change,
+and `Application::shutdown` writes whatever is still waiting. A failed
 save is logged as a warning and the change is kept in memory only.
 
-Nodes are matched by `node.name` and ports by `port.name`, because PipeWire ids change on every
-connection. Two nodes with the same `node.name` therefore share their position, volume and links.
-
-## Pending changes
-Two open pull requests change what this section describes. Update it when they merge:
-
-- [#13](https://github.com/spacedouut/conduit/pull/13) moves saving into a shared `persistence.rs`.
-  Every store, including `hidden-node-patterns` and `show-volume-sliders`, then writes through a
-  private temporary file, and edited comment text is written after a short delay instead of on
-  every keystroke.
-- [#10](https://github.com/spacedouut/conduit/pull/10) gives nodes that share a `node.name` (two
-  streams of the same application, for example) distinct keys, so they no longer share their
-  position and volume. It adds a `graph_manager/node_slots.rs` module and a `node-slots` file.
+Nodes are matched by their key (see [Node keys](#node-keys)) and ports by `port.name`, because
+PipeWire ids change on every connection.

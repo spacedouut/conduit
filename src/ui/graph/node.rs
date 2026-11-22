@@ -112,6 +112,16 @@ mod imp {
                     return;
                 };
                 let popover = gtk::Popover::new();
+                // The popover is a child of the node, so it has to be unparented once it is done.
+                // That is deferred so a click inside the popover can finish being handled first.
+                popover.connect_closed(|popover| {
+                    let popover = popover.clone();
+                    glib::idle_add_local_once(move || {
+                        if popover.parent().is_some() {
+                            popover.unparent();
+                        }
+                    });
+                });
                 let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
                 if node.is_comment() {
                     let delete = gtk::Button::with_label("Delete comment");
@@ -120,25 +130,20 @@ mod imp {
                         node.emit_by_name::<()>("delete-comment", &[]);
                     }));
                     content.append(&delete);
-                    popover.set_child(Some(&content));
-                    popover.set_parent(&node);
-                    popover
-                        .set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
-                    popover.popup();
-                    return;
+                } else {
+                    let show_sliders = gtk::CheckButton::with_label("Show volume sliders");
+                    show_sliders.set_active(node.imp().show_volume_sliders.get());
+                    show_sliders.connect_toggled(glib::clone!(@weak node => move |button| {
+                        node.emit_by_name::<()>("show-volume-sliders-changed", &[&button.is_active()]);
+                    }));
+                    content.append(&show_sliders);
+                    let button = gtk::Button::with_label("Disconnect all");
+                    button.connect_clicked(glib::clone!(@weak node, @weak popover => move |_| {
+                        node.emit_by_name::<()>("disconnect-all", &[]);
+                        popover.popdown();
+                    }));
+                    content.append(&button);
                 }
-                let show_sliders = gtk::CheckButton::with_label("Show volume sliders");
-                show_sliders.set_active(node.imp().show_volume_sliders.get());
-                show_sliders.connect_toggled(glib::clone!(@weak node => move |button| {
-                    node.emit_by_name::<()>("show-volume-sliders-changed", &[&button.is_active()]);
-                }));
-                content.append(&show_sliders);
-                let button = gtk::Button::with_label("Disconnect all");
-                button.connect_clicked(glib::clone!(@weak node, @weak popover => move |_| {
-                    node.emit_by_name::<()>("disconnect-all", &[]);
-                    popover.popdown();
-                }));
-                content.append(&button);
                 popover.set_child(Some(&content));
                 popover.set_parent(&node);
                 popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
@@ -161,7 +166,8 @@ mod imp {
         }
 
         fn dispose(&self) {
-            if let Some(child) = self.obj().first_child() {
+            // This also covers a context popover that is still open or not yet cleaned up.
+            while let Some(child) = self.obj().first_child() {
                 child.unparent();
             }
         }

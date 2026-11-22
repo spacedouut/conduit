@@ -203,7 +203,33 @@ impl GraphManager {
         entry.set_tooltip_text(Some(
             "One regular expression per line; matched PipeWire node.name values are hidden.",
         ));
-        dialog.content_area().append(&entry);
+        entry.set_monospace(true);
+        entry.set_left_margin(6);
+        entry.set_right_margin(6);
+        entry.set_top_margin(6);
+        entry.set_bottom_margin(6);
+
+        let hint = gtk::Label::new(Some(
+            "One regular expression per line. Nodes whose PipeWire node.name matches are hidden.",
+        ));
+        hint.set_xalign(0.0);
+        hint.set_wrap(true);
+
+        let scroller = gtk::ScrolledWindow::new();
+        scroller.set_child(Some(&entry));
+        scroller.set_has_frame(true);
+        scroller.set_vexpand(true);
+        scroller.set_min_content_width(360);
+        scroller.set_min_content_height(160);
+
+        let content = dialog.content_area();
+        content.set_spacing(8);
+        content.set_margin_top(12);
+        content.set_margin_bottom(12);
+        content.set_margin_start(12);
+        content.set_margin_end(12);
+        content.append(&hint);
+        content.append(&scroller);
 
         let error_label = gtk::Label::new(None);
         error_label.set_xalign(0.0);

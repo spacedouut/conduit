@@ -242,7 +242,17 @@ impl GraphManager {
             error_label.set_text(&invalid_patterns_message(invalid));
             error_label.set_visible(!invalid.is_empty());
         }
-        dialog.content_area().append(&error_label);
+        // A long list of invalid patterns scrolls instead of growing the dialog.
+        let error_scroller = gtk::ScrolledWindow::new();
+        error_scroller.set_child(Some(&error_label));
+        error_scroller.set_hscrollbar_policy(gtk::PolicyType::Never);
+        error_scroller.set_propagate_natural_height(true);
+        error_scroller.set_max_content_height(120);
+        error_label
+            .bind_property("visible", &error_scroller, "visible")
+            .sync_create()
+            .build();
+        content.append(&error_scroller);
 
         dialog.connect_response(glib::clone!(
             @weak self as manager,

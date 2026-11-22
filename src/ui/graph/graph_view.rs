@@ -927,13 +927,22 @@ mod imp {
             };
             let zoom_factor = self.zoom_factor.get();
 
+            // GTK keeps the scroll value below upper - page_size. The canvas
+            // is CANVAS_SIZE units wide, so a view wider than half of it would
+            // make the launch position out of range and the graph would snap
+            // sideways on the next allocation. Extend the upper bound so the
+            // current position stays valid.
+            let lower = -(CANVAS_SIZE / 2.0) * zoom_factor;
+            let page_size = f64::from(size) * zoom_factor;
+            let upper = ((CANVAS_SIZE / 2.0) * zoom_factor).max(adjustment.value() + page_size);
+
             adjustment.configure(
                 adjustment.value(),
-                -(CANVAS_SIZE / 2.0) * zoom_factor,
-                (CANVAS_SIZE / 2.0) * zoom_factor,
+                lower,
+                upper,
                 (f64::from(size) * 0.1) * zoom_factor,
                 (f64::from(size) * 0.9) * zoom_factor,
-                f64::from(size) * zoom_factor,
+                page_size,
             );
         }
     }

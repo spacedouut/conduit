@@ -66,6 +66,10 @@ $ meson install
 in the repository root.
 This will install the compiled project files into `/usr/local`.
 
+# Contributing
+[docs/architecture.md](docs/architecture.md) explains how the code is organized, and
+[docs/development.md](docs/development.md) how to build, test and run Conduit while working on it.
+
 # License and credits
 Conduit is distributed under the terms of the GPL3 license.
 See LICENSE for more information.

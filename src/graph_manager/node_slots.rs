@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, fs, path::PathBuf};
 
-use crate::node_layout::{decode_key, encode_key};
+use crate::persistence::{self, decode as decode_key, encode as encode_key};
 
 #[derive(Default)]
 pub(super) struct NodeSlots {
@@ -13,7 +13,7 @@ pub(super) struct NodeSlots {
 
 impl NodeSlots {
     pub fn load(cookie: u32) -> Self {
-        let path = adw::glib::user_config_dir().join("conduit/node-slots");
+        let path = persistence::config_path("node-slots");
         let mut slots = Self::parse(&fs::read_to_string(&path).unwrap_or_default(), cookie);
         slots.path = Some(path);
         slots
@@ -57,19 +57,8 @@ impl NodeSlots {
     }
 
     pub fn save(&self) {
-        let Some(path) = &self.path else {
-            return;
-        };
-        let Some(parent) = path.parent() else {
-            return;
-        };
-        let temporary = path.with_extension("tmp");
-        if let Err(error) = fs::create_dir_all(parent)
-            .and_then(|_| fs::write(&temporary, self.serialize()))
-            .and_then(|_| fs::rename(&temporary, path))
-        {
-            log::warn!("Could not save node slots: {error}");
-            let _ = fs::remove_file(temporary);
+        if let Some(path) = &self.path {
+            persistence::write_atomically(path, &self.serialize(), "node slots");
         }
     }
 }
@@ -94,5 +83,25 @@ mod tests {
         assert!(NodeSlots::parse("123\nbad\n42\tzz\t00\n", 123)
             .entries
             .is_empty());
+    }
+
+    #[test]
+    fn saved_text_keeps_its_format() {
+        let directory = persistence::test_directory("node-slots");
+        let mut slots = NodeSlots {
+            cookie: 123,
+            path: Some(directory.join("node-slots")),
+            ..NodeSlots::default()
+        };
+        slots.entries.insert(42, ("b".into(), "b#2".into()));
+        slots.entries.insert(7, ("a".into(), "a".into()));
+        slots.save();
+
+        assert_eq!(
+            fs::read_to_string(directory.join("node-slots")).unwrap(),
+            "123\n7\t61\t61\n42\t62\t622332\n"
+        );
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        let _ = fs::remove_dir_all(directory);
     }
 }

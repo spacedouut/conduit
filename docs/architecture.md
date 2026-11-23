@@ -128,7 +128,9 @@ written through the device's `Route` param, like other mixers do, and through `P
 A virtual device is a `support.null-audio-sink` adapter node that Conduit creates with
 `object.linger`, so it stays in PipeWire after Conduit quits or disconnects. Its `node.name` is
 derived from its name and kind (`virtual_device_store::Definition::node_name`,
-`conduit.virtual.<kind>.<slug>`).
+`conduit.virtual.<kind>.<slug>`). It is also created with `state.restore-props = false`: Conduit
+keeps the device's volume itself, and a new device is saved at full volume, so a re-created device
+does not pick up the volume the session manager remembers for a removed one of the same name.
 
 Because the node may already be running from an earlier launch, `state_updates.rs` holds
 `CreateVirtualDevice` requests until the registry has been listed once (a `core.sync` round trip).
@@ -194,9 +196,15 @@ Only links that touch a saved virtual device are remembered. For those, `LinkMan
 ## Volumes
 A virtual device's volume is saved with its definition. For any other node, a volume is only
 remembered once the user changed it in Conduit; after that, changes made elsewhere are followed
-too, so a restart restores the latest value. When a remembered node appears, the first volume it
-reports is replaced by the saved one. Writes of `node-volumes` are delayed by 500 ms so that
-dragging a slider does not rewrite the file on every step.
+too, so a restart restores the latest value.
+
+When a remembered node appears, the volumes it reports are replaced by the saved one, from its
+first report until 2 seconds after it (`RESTORE_WINDOW`). The session manager applies the volume
+it remembers itself just after a node appears, which can be before or after that first report, and
+the saved one has to win either way. A volume the user sets in Conduit ends the restore at once.
+
+Writes of `node-volumes` are held back for up to 500 ms so that dragging a slider does not rewrite
+the file on every step.
 
 ## Visibility
 `GraphManager::refresh_item_visibility` decides what is shown:
@@ -225,7 +233,9 @@ what the graph manager gives them and emit signals for user input.
 
 `application.rs` holds the `Application`: command line options (`--socket`, `--hidden`), the
 `quit`, `about` and `autostart` actions, and the tray handling. While a tray host is available,
-closing the window only hides it. `autostart.rs` implements "Run on Startup": an XDG autostart
+closing the window only hides it. The window's size and maximized state are saved (`window_state.rs`)
+when it is closed, and on quit if it is still shown; `Window` applies them when it is built.
+`autostart.rs` implements "Run on Startup": an XDG autostart
 entry for native installs, the Background portal in the Flatpak.
 
 # Saved data
@@ -243,6 +253,7 @@ for the Flatpak. All of it is read and written on the GTK thread.
 | `hidden-node-patterns` | `node_filter.rs` | One regular expression per line, matched against the `node.name`. Plain text. |
 | `node-slots` | `graph_manager/node_slots.rs` | Which key each live node holds: the PipeWire core's cookie, then object serial, escaped `node.name`, key. See [Node keys](#node-keys). |
 | `show-volume-sliders` | `volume_slider_setting.rs` | `true` or `false`. |
+| `window-state` | `window_state.rs` | The main window: width and height while not maximized, and `true` or `false` for maximized. |
 | `autostart` | `autostart.rs` | Flatpak only: the last answer of the Background portal. |
 
 The formats are line based with tab-separated fields. Names, node keys, port names and comment
@@ -252,8 +263,8 @@ parse are skipped when loading. Volumes are linear (1.0 is 100%), not the cubic 
 The stores save themselves when they change. `persistence.rs` holds what they share: the config
 path, the hex encoding, and `write_atomically`, which writes a new temporary file next to the
 target and renames it over, so an interrupted save leaves the previous file intact. If the target
-is a symlink, the file it points to is replaced and the link is kept. (`node-slots` and `autostart`
-do not go through it.) Comment text and `node-volumes` are written at most once every 500 ms:
+is a symlink, the file it points to is replaced and the link is kept. (`autostart`
+does not go through it.) Comment text and `node-volumes` are written at most once every 500 ms:
 the first unsaved change starts a timer, and when it fires everything changed since is written, so
 a save can happen while the user is still typing or dragging. `Application::shutdown` writes
 whatever is still waiting. A failed

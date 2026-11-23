@@ -268,7 +268,10 @@ fn create_or_adopt_virtual_device(
                 "node.autoconnect" => "false",
                 "monitor.channel-volumes" => "true",
                 "application.name" => "Conduit",
-                "object.linger" => "true"
+                "object.linger" => "true",
+                // Conduit keeps the volume itself; the session manager's
+                // copy is shared by every device and outlives a removed one.
+                "state.restore-props" => "false"
             },
         ),
         VirtualDeviceKind::Source => core.create_object::<Node>(
@@ -283,7 +286,10 @@ fn create_or_adopt_virtual_device(
                 "node.autoconnect" => "false",
                 "monitor.passthrough" => "true",
                 "application.name" => "Conduit",
-                "object.linger" => "true"
+                "object.linger" => "true",
+                // Conduit keeps the volume itself; the session manager's
+                // copy is shared by every device and outlives a removed one.
+                "state.restore-props" => "false"
             },
         ),
     };

@@ -27,6 +27,7 @@ mod tray;
 mod ui;
 mod virtual_device_store;
 mod volume_slider_setting;
+mod window_state;
 
 use adw::{gtk, prelude::*};
 use pipewire::spa::{param::format::MediaType, utils::Direction};

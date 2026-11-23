@@ -1,9 +1,12 @@
 use adw::{gio, gtk, prelude::*, subclass::prelude::*};
 
 use super::graph;
+use crate::window_state::{WindowGeometry, WindowState};
 
 mod imp {
     use super::*;
+
+    use std::cell::RefCell;
 
     #[derive(Default, gtk::CompositeTemplate, glib::Properties)]
     #[properties(wrapper_type = super::Window)]
@@ -35,6 +38,7 @@ mod imp {
         #[template_child]
         #[property(type = graph::GraphView, get = |_| self.graph.clone())]
         pub graph: TemplateChild<graph::GraphView>,
+        pub(super) window_state: RefCell<WindowState>,
     }
 
     #[glib::object_subclass]
@@ -57,9 +61,24 @@ mod imp {
     }
 
     #[glib::derived_properties]
-    impl ObjectImpl for Window {}
+    impl ObjectImpl for Window {
+        fn constructed(&self) {
+            self.parent_constructed();
+
+            if let Some(geometry) = self.window_state.borrow().geometry() {
+                let obj = self.obj();
+                obj.set_default_size(geometry.width, geometry.height);
+                obj.set_maximized(geometry.maximized);
+            }
+        }
+    }
     impl WidgetImpl for Window {}
-    impl WindowImpl for Window {}
+    impl WindowImpl for Window {
+        fn close_request(&self) -> glib::Propagation {
+            self.obj().save_state();
+            self.parent_close_request()
+        }
+    }
     impl ApplicationWindowImpl for Window {}
     impl AdwApplicationWindowImpl for Window {}
 }
@@ -73,6 +92,18 @@ glib::wrapper! {
 impl Window {
     pub fn new() -> Self {
         glib::Object::new()
+    }
+
+    /// Remember the size and maximized state for the next launch. Only
+    /// meaningful while the window is shown.
+    pub fn save_state(&self) {
+        // GTK keeps the default size at the window's unmaximized size.
+        let (width, height) = self.default_size();
+        self.imp().window_state.borrow_mut().save(WindowGeometry {
+            width,
+            height,
+            maximized: self.is_maximized(),
+        });
     }
 }
 

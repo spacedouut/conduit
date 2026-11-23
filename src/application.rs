@@ -86,6 +86,11 @@ mod imp {
             if let Some(graph_manager) = self.graph_manager.get() {
                 graph_manager.save_pending();
             }
+            // Quitting doesn't close the window; a closed or hidden one
+            // saved its state when it was closed.
+            if self.window.is_visible() {
+                self.window.save_state();
+            }
             self.parent_shutdown();
         }
 

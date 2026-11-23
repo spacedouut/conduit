@@ -876,9 +876,13 @@ impl GraphManager {
                 )
             })
             .collect();
-        for (id, text, position) in saved_comments {
-            res.add_comment_node(id, &text, position);
-        }
+        // The manager is built before the application loads its dark style;
+        // a text view created that early keeps drawing black text.
+        glib::idle_add_local_once(glib::clone!(@weak res => move || {
+            for (id, text, position) in saved_comments {
+                res.add_comment_node(id, &text, position);
+            }
+        }));
         graph.set_node_position_changed_handler(glib::clone!(@weak res => move |node, position| {
             res.node_position_changed(node, position);
         }));
